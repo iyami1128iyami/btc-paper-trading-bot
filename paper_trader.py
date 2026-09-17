@@ -5,9 +5,11 @@
 売買シグナルに従って「買った/売ったつもり」で記録していく。
 """
 
-import json
 import csv
+import json
+import logging
 import os
+import threading
 from datetime import datetime, timezone
 
 from config import (
@@ -17,52 +19,80 @@ from config import (
     STATE_FILE,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class PaperTrader:
-    def __init__(self):
+    def __init__(self, stop_loss_pct: float = 5.0, take_profit_pct: float = 10.0):
+        self._lock = threading.Lock()
         self.state = self._load_state()
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
+        self.entry_price = self.state.get("entry_price")
         self._init_log_file()
-
-    # ---------- 状態の読み書き ----------
 
     def _load_state(self):
         if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        # 初回起動時の初期状態
+            try:
+                with open(STATE_FILE, "r") as f:
+                    state = json.load(f)
+                    state.setdefault("entry_price", None)
+                    return state
+            except Exception as e:
+                logger.error(f"状態ファイル読み込み失敗: {e}. 初期化します")
+
         return {
             "usdt_balance": INITIAL_BALANCE_USDT,
             "btc_balance": 0.0,
-            "position": "NONE",  # NONE または LONG
+            "position": "NONE",
+            "entry_price": None,
         }
 
     def _save_state(self):
-        with open(STATE_FILE, "w") as f:
-            json.dump(self.state, f, indent=2)
+        try:
+            self.state["entry_price"] = self.entry_price
+            with open(STATE_FILE, "w") as f:
+                json.dump(self.state, f, indent=2)
+        except Exception as e:
+            logger.error(f"状態ファイル保存失敗: {e}")
+            raise
 
     def _init_log_file(self):
         if not os.path.exists(LOG_FILE):
-            with open(LOG_FILE, "w", newline="") as f:
+            try:
+                with open(LOG_FILE, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(
+                        [
+                            "timestamp",
+                            "action",
+                            "price",
+                            "amount_btc",
+                            "usdt_balance",
+                            "btc_balance",
+                            "reason",
+                        ]
+                    )
+            except Exception as e:
+                logger.error(f"ログファイル初期化失敗: {e}")
+
+    def _log_trade(self, action: str, price: float, amount_btc: float, reason: str = ""):
+        try:
+            with open(LOG_FILE, "a", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(
-                    ["timestamp", "action", "price", "amount_btc", "usdt_balance", "btc_balance"]
+                    [
+                        datetime.now(timezone.utc).isoformat(),
+                        action,
+                        round(price, 2),
+                        round(amount_btc, 8),
+                        round(self.state["usdt_balance"], 2),
+                        round(self.state["btc_balance"], 8),
+                        reason,
+                    ]
                 )
-
-    def _log_trade(self, action, price, amount_btc):
-        with open(LOG_FILE, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    datetime.now(timezone.utc).isoformat(),
-                    action,
-                    price,
-                    amount_btc,
-                    round(self.state["usdt_balance"], 2),
-                    round(self.state["btc_balance"], 8),
-                ]
-            )
-
-    # ---------- 売買処理 ----------
+        except Exception as e:
+            logger.error(f"ログ記録失敗: {e}")
 
     def execute(self, signal: str, price: float):
         """
@@ -70,33 +100,56 @@ class PaperTrader:
         BUY: ポジションを持っていない時だけ買う
         SELL: ポジションを持っている時だけ売る
         """
-        if signal == "BUY" and self.state["position"] == "NONE":
-            spend_usdt = self.state["usdt_balance"] * TRADE_RATIO
-            amount_btc = spend_usdt / price
+        with self._lock:
+            if self.state["position"] == "LONG" and self.entry_price is not None:
+                price_change_pct = ((price - self.entry_price) / self.entry_price) * 100
 
-            self.state["usdt_balance"] -= spend_usdt
-            self.state["btc_balance"] += amount_btc
-            self.state["position"] = "LONG"
+                if price_change_pct >= self.take_profit_pct:
+                    logger.info(f"テイクプロフィット発動: {price_change_pct:.2f}%")
+                    return self._execute_sell(price, f"TP {price_change_pct:.2f}%")
 
-            self._log_trade("BUY", price, amount_btc)
-            self._save_state()
-            return f"BUY: {amount_btc:.6f} BTC @ {price:.2f} USDT"
+                if price_change_pct <= -self.stop_loss_pct:
+                    logger.warning(f"ストップロス発動: {price_change_pct:.2f}%")
+                    return self._execute_sell(price, f"SL {price_change_pct:.2f}%")
 
-        elif signal == "SELL" and self.state["position"] == "LONG":
-            amount_btc = self.state["btc_balance"]
-            gain_usdt = amount_btc * price
+            if signal == "BUY" and self.state["position"] == "NONE":
+                return self._execute_buy(price, "Signal")
+            elif signal == "SELL" and self.state["position"] == "LONG":
+                return self._execute_sell(price, "Signal")
+            else:
+                return "HOLD: 何もしない"
 
-            self.state["usdt_balance"] += gain_usdt
-            self.state["btc_balance"] = 0.0
-            self.state["position"] = "NONE"
+    def _execute_buy(self, price: float, reason: str) -> str:
+        spend_usdt = self.state["usdt_balance"] * TRADE_RATIO
+        amount_btc = spend_usdt / price
 
-            self._log_trade("SELL", price, amount_btc)
-            self._save_state()
-            return f"SELL: {amount_btc:.6f} BTC @ {price:.2f} USDT"
+        self.state["usdt_balance"] -= spend_usdt
+        self.state["btc_balance"] += amount_btc
+        self.state["position"] = "LONG"
+        self.entry_price = price
 
-        else:
-            return "HOLD: 何もしない"
+        self._log_trade("BUY", price, amount_btc, reason)
+        self._save_state()
+        logger.info(f"BUY実行: {amount_btc:.6f} BTC @ {price:.2f} USDT ({reason})")
+        return f"BUY: {amount_btc:.6f} BTC @ {price:.2f} USDT"
+
+    def _execute_sell(self, price: float, reason: str) -> str:
+        amount_btc = self.state["btc_balance"]
+        cost_basis = amount_btc * self.entry_price if self.entry_price is not None else 0.0
+        gain_usdt = amount_btc * price
+        pnl = gain_usdt - cost_basis
+
+        self.state["usdt_balance"] += gain_usdt
+        self.state["btc_balance"] = 0.0
+        self.state["position"] = "NONE"
+        self.entry_price = None
+
+        self._log_trade("SELL", price, amount_btc, reason)
+        self._save_state()
+        logger.info(f"SELL実行: {amount_btc:.6f} BTC @ {price:.2f} USDT | P&L: {pnl:.2f} ({reason})")
+        return f"SELL: {amount_btc:.6f} BTC @ {price:.2f} USDT"
 
     def portfolio_value(self, current_price: float) -> float:
-        """現在の評価総資產(USDT換算)を計算する"""
-        return self.state["usdt_balance"] + self.state["btc_balance"] * current_price
+        """現在の評価総資産(USDT換算)を計算する"""
+        with self._lock:
+            return self.state["usdt_balance"] + self.state["btc_balance"] * current_price
