@@ -9,9 +9,9 @@ import time
 from datetime import datetime
 
 from config import FETCH_INTERVAL_SEC
-from data_fetcher import fetch_klines
-from strategy import generate_signal
-from paper_trader import PaperTrader
+from improved.data_fetcher import fetch_klines
+from improved.strategy import generate_signal
+from improved.paper_trader import PaperTrader
 
 
 def run_loop():
