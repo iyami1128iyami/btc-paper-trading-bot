@@ -1,11 +1,4 @@
-"""
-Render にデプロイするためのWebサーバー。
-
-Renderの無料/Starterプランでは常時起動するWebサービスとして
-ヘルスチェック用のHTTPエンドポイントを持たせておくと運用しやすいため、
-Flaskで簡単なステータス確認APIを立てつつ、
-裏側のスレッドで売買ループを回す構成にしている。
-"""
+"""Render用Webサーバーと取引ループ。"""
 
 import threading
 import time
@@ -20,15 +13,8 @@ from improved.paper_trader import PaperTrader
 
 app = Flask(__name__)
 trader = PaperTrader()
-
-# 直近の状態をメモリ上にも保持しておき、/status で確認できるようにする
-latest_status = {
-    "updated_at": None,
-    "price": None,
-    "signal": None,
-    "action": None,
-    "portfolio_value": None,
-}
+latest_status = {"updated_at": None, "price": None, "signal": None, "action": None, "portfolio_value": None}
+status_lock = threading.Lock()
 
 
 def trading_loop():
@@ -40,19 +26,11 @@ def trading_loop():
             signal = generate_signal(prices)
             result = trader.execute(signal, current_price)
             value = trader.portfolio_value(current_price)
-
-            latest_status = {
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "price": current_price,
-                "signal": signal,
-                "action": result,
-                "portfolio_value": round(value, 2),
-            }
+            with status_lock:
+                latest_status = {"updated_at": datetime.now(timezone.utc).isoformat(), "price": current_price, "signal": signal, "action": result, "portfolio_value": round(value, 2)}
             print(latest_status)
-
-        except Exception as e:
-            print(f"エラーが発生しました: {e}")
-
+        except Exception as exc:
+            print(f"エラーが発生しました: {exc}")
         time.sleep(FETCH_INTERVAL_SEC)
 
 
@@ -63,24 +41,20 @@ def index():
 
 @app.route("/status")
 def status():
-    return jsonify(latest_status)
+    with status_lock:
+        return jsonify(dict(latest_status))
 
 
 @app.route("/ping")
 def ping():
-    """
-    UptimeRobotなどの外部監視サービスからの定期アクセス用エンドポイント。
-    価格取得や計算を行わず即座に返すだけなので、スリープ防止用のpingに向いている。
-    """
     return "pong", 200
 
 
 @app.route("/state")
 def state():
-    return jsonify(trader.state)
+    return jsonify(trader.snapshot())
 
 
-# アプリ起動時に売買ループをバックグラウンドスレッドで開始
 threading.Thread(target=trading_loop, daemon=True).start()
 
 if __name__ == "__main__":
