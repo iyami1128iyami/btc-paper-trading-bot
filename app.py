@@ -9,14 +9,14 @@ Flaskで簡単なステータス確認APIを立てつつ、
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify
 
 from config import FETCH_INTERVAL_SEC
-from data_fetcher import fetch_klines
-from strategy import generate_signal
-from paper_trader import PaperTrader
+from improved.data_fetcher import fetch_klines
+from improved.strategy import generate_signal
+from improved.paper_trader import PaperTrader
 
 app = Flask(__name__)
 trader = PaperTrader()
@@ -42,7 +42,7 @@ def trading_loop():
             value = trader.portfolio_value(current_price)
 
             latest_status = {
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
                 "price": current_price,
                 "signal": signal,
                 "action": result,
