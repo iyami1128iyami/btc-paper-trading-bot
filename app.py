@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify
 
-from config import FETCH_INTERVAL_SEC
+from config import FETCH_INTERVAL_SEC, SYMBOL
 from improved.data_fetcher import fetch_klines
 from improved.strategy import generate_signal
 from improved.paper_trader import PaperTrader
@@ -36,7 +36,7 @@ def trading_loop():
 
 @app.route("/")
 def index():
-    return jsonify({"service": "btc-paper-trading-bot", "status": "running"})
+    return jsonify({"service": "btc-paper-trading-bot", "symbol": SYMBOL, "status": "running"})
 
 
 @app.route("/status")

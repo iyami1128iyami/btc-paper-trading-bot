@@ -23,5 +23,6 @@ SHORT_WINDOW = int(os.getenv("SHORT_WINDOW", "5"))  # 短期移動平均の期�
 LONG_WINDOW = int(os.getenv("LONG_WINDOW", "20"))  # 長期移動平均の期間
 
 # ========== ファイルパス ==========
-LOG_FILE = os.getenv("LOG_FILE", "trade_log.csv")
-STATE_FILE = os.getenv("STATE_FILE", "state.json")
+# ペアごとに状態・ログを分離する(切り替え時に別ペアの残高と混ざらないようにするため)
+LOG_FILE = os.getenv("LOG_FILE", f"trade_log_{SYMBOL}.csv")
+STATE_FILE = os.getenv("STATE_FILE", f"state_{SYMBOL}.json")
