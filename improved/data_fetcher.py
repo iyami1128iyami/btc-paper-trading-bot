@@ -90,3 +90,83 @@ def fetch_klines(limit: int = 100, retries: int = 3, backoff_factor: float = 2.0
 def fetch_latest_price(retries: int = 3):
     closes = fetch_klines(limit=1, retries=retries)
     return closes[-1]
+
+
+def fetch_historical_closes(total: int = 1000, retries: int = 3, backoff_factor: float = 2.0):
+    """
+    バックテスト用に、古い方向へページネーションしながら大量の終値を取得する。
+    Binance APIは1リクエストあたり最大1000本までしか返さないため、
+    `endTime` を過去にずらしながら複数回に分けて取得する。
+
+    Returns:
+        list[float]: 終値のリスト(古い順)
+    """
+    if total <= 0:
+        raise ValueError(f"total must be positive: {total}")
+
+    all_closes: list[float] = []
+    end_time = None
+    remaining = total
+
+    while remaining > 0:
+        batch_limit = min(remaining, 1000)
+        params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": batch_limit}
+        if end_time is not None:
+            params["endTime"] = end_time
+
+        raw = None
+        for attempt in range(retries):
+            try:
+                resp = requests.get(BASE_URL, params=params, timeout=10)
+                if resp.status_code == 429:
+                    retry_after = _retry_after_seconds(resp)
+                    logger.warning("レート制限に達しました。%s秒待機します", retry_after)
+                    if attempt < retries - 1:
+                        time.sleep(retry_after)
+                        continue
+                    resp.raise_for_status()
+                resp.raise_for_status()
+                raw = resp.json()
+                break
+            except (ConnectionError, Timeout, RequestException) as exc:
+                if attempt >= retries - 1:
+                    logger.error("過去データ取得に失敗しました: %s", exc)
+                    raise
+                time.sleep(backoff_factor**attempt)
+
+        if not isinstance(raw, list) or not raw:
+            break
+
+        batch_closes = []
+        oldest_open_time = None
+        for candle in raw:
+            if not isinstance(candle, (list, tuple)) or len(candle) < 5:
+                continue
+            try:
+                close = float(candle[4])
+                open_time = int(candle[0])
+            except (ValueError, TypeError):
+                continue
+            if not math.isfinite(close) or close <= 0:
+                continue
+            batch_closes.append(close)
+            if oldest_open_time is None:
+                oldest_open_time = open_time
+
+        if not batch_closes:
+            break
+
+        # 取得したバッチは新しい順ではなく古い順で返ってくるので、先頭に追加していく
+        all_closes = batch_closes + all_closes
+        remaining -= len(batch_closes)
+
+        if oldest_open_time is None:
+            break
+        # 次のリクエストは、このバッチの最も古いローソク足より前を取得する
+        end_time = oldest_open_time - 1
+
+        if len(raw) < batch_limit:
+            # これ以上過去のデータが存在しない
+            break
+
+    return all_closes[-total:] if len(all_closes) > total else all_closes

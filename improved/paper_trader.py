@@ -8,7 +8,7 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from config import INITIAL_BALANCE_USDT, LOG_FILE, STATE_FILE, TRADE_RATIO
+from config import INITIAL_BALANCE_USDT, LOG_FILE, STATE_FILE, SYMBOL, TRADE_RATIO
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,13 @@ class PaperTrader:
         self._init_log_file()
 
     def _default_state(self):
-        return {"usdt_balance": INITIAL_BALANCE_USDT, "btc_balance": 0.0, "position": "NONE", "entry_price": None}
+        return {
+            "symbol": SYMBOL,
+            "usdt_balance": INITIAL_BALANCE_USDT,
+            "asset_balance": 0.0,
+            "position": "NONE",
+            "entry_price": None,
+        }
 
     def _load_state(self):
         if not os.path.exists(STATE_FILE):
@@ -35,10 +41,25 @@ class PaperTrader:
                 state = json.load(file)
             if not isinstance(state, dict):
                 raise ValueError("state must be an object")
+
+            # 古い形式(symbol未記録、asset_balanceがbtc_balanceという名前)への後方互換
+            if "asset_balance" not in state and "btc_balance" in state:
+                state["asset_balance"] = state.pop("btc_balance")
+            state.setdefault("symbol", SYMBOL)
             state.setdefault("entry_price", None)
+
+            # 現在の設定(config.SYMBOL)と、保存されている状態のペアが食い違っていないか確認する。
+            # 食い違ったまま続行すると、別の銘柄の残高を今のペアの価格で評価してしまい、
+            # 資産計算が大きく狂う(例: BTCの残高をETHの価格で評価してしまう)ため、ここで止める。
+            if state["symbol"] != SYMBOL:
+                raise ValueError(
+                    f"状態ファイルのペア({state['symbol']})と現在の設定のペア({SYMBOL})が一致しません。"
+                    f"STATE_FILE/LOG_FILEを分けるか、意図的な切り替えならファイルを削除してください。"
+                )
+
             if state.get("position") not in {"NONE", "LONG"}:
                 raise ValueError("invalid position")
-            for key in ("usdt_balance", "btc_balance"):
+            for key in ("usdt_balance", "asset_balance"):
                 value = state[key]
                 if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                     raise ValueError(f"invalid {key}")
@@ -69,13 +90,15 @@ class PaperTrader:
     def _init_log_file(self):
         if not os.path.exists(LOG_FILE):
             with open(LOG_FILE, "w", newline="", encoding="utf-8") as file:
-                csv.writer(file).writerow(["timestamp", "action", "price", "amount_btc", "usdt_balance", "btc_balance", "reason"])
+                csv.writer(file).writerow(
+                    ["timestamp", "symbol", "action", "price", "amount", "usdt_balance", "asset_balance", "reason"]
+                )
 
-    def _log_trade(self, action, price, amount_btc, reason=""):
+    def _log_trade(self, action, price, amount, reason=""):
         with open(LOG_FILE, "a", newline="", encoding="utf-8") as file:
             csv.writer(file).writerow([
-                datetime.now(timezone.utc).isoformat(), action, round(price, 2), round(amount_btc, 8),
-                round(self.state["usdt_balance"], 2), round(self.state["btc_balance"], 8), reason,
+                datetime.now(timezone.utc).isoformat(), SYMBOL, action, round(price, 2), round(amount, 8),
+                round(self.state["usdt_balance"], 2), round(self.state["asset_balance"], 8), reason,
             ])
 
     def execute(self, signal: str, price: float) -> str:
@@ -98,34 +121,34 @@ class PaperTrader:
         spend = self.state["usdt_balance"] * TRADE_RATIO
         amount = spend / price
         self.state["usdt_balance"] -= spend
-        self.state["btc_balance"] += amount
+        self.state["asset_balance"] += amount
         self.state["position"] = "LONG"
         self.entry_price = price
         self.state["entry_price"] = price
         self._log_trade("BUY", price, amount, reason)
         self._save_state()
-        return f"BUY: {amount:.6f} BTC @ {price:.2f} USDT"
+        return f"BUY: {amount:.6f} {SYMBOL} @ {price:.2f}"
 
     def _execute_sell(self, price, reason):
-        amount = self.state["btc_balance"]
+        amount = self.state["asset_balance"]
         gain = amount * price
         cost = amount * self.entry_price
         pnl = gain - cost
         self.state["usdt_balance"] += gain
-        self.state["btc_balance"] = 0.0
+        self.state["asset_balance"] = 0.0
         self.state["position"] = "NONE"
         self.entry_price = None
         self.state["entry_price"] = None
         self._log_trade("SELL", price, amount, reason)
         self._save_state()
         logger.info("SELL P&L: %.2f (%s)", pnl, reason)
-        return f"SELL: {amount:.6f} BTC @ {price:.2f} USDT"
+        return f"SELL: {amount:.6f} {SYMBOL} @ {price:.2f}"
 
     def portfolio_value(self, current_price: float) -> float:
         if not isinstance(current_price, (int, float)) or not math.isfinite(current_price) or current_price < 0:
             raise ValueError("current_price must be finite and non-negative")
         with self._lock:
-            return self.state["usdt_balance"] + self.state["btc_balance"] * current_price
+            return self.state["usdt_balance"] + self.state["asset_balance"] * current_price
 
     def snapshot(self):
         with self._lock:
