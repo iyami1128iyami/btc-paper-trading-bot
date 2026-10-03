@@ -1,7 +1,8 @@
 # BTCペーパートレードボット
 
 移動平均線クロス戦略(+RSIフィルター、ストップロス/テイクプロフィット)を使用した
-自動売買シミュレーター。Binanceの公開APIを使用して価格データを取得します。
+自動売買シミュレーター。**CoinGecko**の公開APIを使用して価格データを取得します
+(地域制限がなく、Render等どのリージョンからでもアクセス可能)。
 
 ## 機能
 
@@ -19,11 +20,11 @@ python app.py
 過去データに対して現在の戦略をそのまま当てはめ、成績を検証できます。
 
 ```bash
-# デフォルト設定(直近1000本)でバックテスト
+# デフォルト設定(直近1000件相当)でバックテスト
 python backtest.py
 
-# 本数・時間足・戦略パラメータを指定
-python backtest.py --candles 2000 --interval 1h --short 5 --long 25 --stop-loss 3 --take-profit 8
+# 本数・戦略パラメータを指定
+python backtest.py --candles 2000 --short 5 --long 25 --stop-loss 3 --take-profit 8
 ```
 
 実行すると以下のようなサマリーが表示され、取引明細が `backtest_trades.csv` に保存されます。
@@ -44,8 +45,7 @@ python backtest.py --candles 2000 --interval 1h --short 5 --long 25 --stop-loss 
 | オプション | 説明 | デフォルト |
 |---|---|---|
 | `--symbol` | 対象銘柄 | `config.py`の`SYMBOL` |
-| `--interval` | ローソク足間隔(1m, 5m, 1h, 1dなど) | `config.py`の`INTERVAL` |
-| `--candles` | 取得するローソク足の本数 | 1000 |
+| `--candles` | 取得する価格データの本数の目安 | 1000 |
 | `--short` | 短期移動平均の期間 | `config.py`の`SHORT_WINDOW` |
 | `--long` | 長期移動平均の期間 | `config.py`の`LONG_WINDOW` |
 | `--initial-balance` | 初期資金(USDT) | `config.py`の`INITIAL_BALANCE_USDT` |
@@ -54,16 +54,31 @@ python backtest.py --candles 2000 --interval 1h --short 5 --long 25 --stop-loss 
 | `--take-profit` | テイクプロフィット(%) | 10.0 |
 | `--out` | 取引明細の出力先CSV | `backtest_trades.csv` |
 
-**注意**: バックテストは本番用の`state.json`/`trade_log.csv`には一切触れません
-(専用のインメモリエンジンで計算するため、ペーパートレードの状態を汚しません)。
-また、過去データでの好成績が将来の成績を保証するものではありません。
+**注意**:
+- バックテストは本番用の`state.json`/`trade_log.csv`には一切触れません(専用のインメモリエンジンで計算)。
+- CoinGeckoは「何日分」の指定しかできず、期間に応じて粒度(5分/1時間/1日間隔)が自動で変わります。`--candles`の本数から必要な日数を逆算して取得します。
+- 過去データでの好成績が将来の成績を保証するものではありません。
 
 ## エンドポイント
 
-- `GET /` - サービス状況確認
+- `GET /` - サービス状況確認(現在の取引ペアも表示)
 - `GET /status` - 最新の売買情報を取得
 - `GET /state` - 現在のポートフォリオ状況を取得
 - `GET /ping` - ヘルスチェック(UptimeRobot用)
+
+## データソース: CoinGecko
+
+以前はBinanceの公開APIを使用していましたが、**Renderの米国リージョンからのアクセスが
+451エラー(法的理由によるブロック)で拒否される問題**があったため、地域制限のない
+CoinGeckoに切り替えました。
+
+- APIキー不要(無料プランは5〜30回/分程度のレート制限)
+- もっと高頻度に使いたい場合は、CoinGeckoの無料Demo APIキーを取得し、
+  `COINGECKO_API_KEY`環境変数に設定するとレート制限が緩和されます(100回/分)
+- 対応銘柄は`improved/data_fetcher.py`の`SYMBOL_TO_COINGECKO`に一覧があります
+  (BTC, ETH, SOL, BNB, XRP, DOGE, ADAのUSDT/JPYペアなど)
+- 一覧にないペアを使いたい場合は、`COINGECKO_ID`と`COINGECKO_VS_CURRENCY`の
+  環境変数で直接指定できます(例: `COINGECKO_ID=polkadot`, `COINGECKO_VS_CURRENCY=usd`)
 
 ## 設定
 
@@ -71,16 +86,18 @@ python backtest.py --candles 2000 --interval 1h --short 5 --long 25 --stop-loss 
 
 ### 主要な設定
 - `SYMBOL`: 取得対象(デフォルト: BTCUSDT)
-- `INTERVAL`: ローソク足(デフォルト: 5m)
 - `FETCH_INTERVAL_SEC`: API呼び出し間隔(秒)
 - `INITIAL_BALANCE_USDT`: 初期資金
 - `TRADE_RATIO`: 1回の売買で使用する残高の割合
 - `SHORT_WINDOW`: 短期移動平均の期間
 - `LONG_WINDOW`: 長期移動平均の期間
+- `COINGECKO_ID` / `COINGECKO_VS_CURRENCY`: マッピング表にない銘柄を使う場合に指定
+- `COINGECKO_API_KEY`: レート制限を緩和したい場合(任意)
 
 ## 取引ペアの切り替え
 
-`SYMBOL`環境変数を変更するだけで、別の通貨ペアに切り替えられます(例: `ETHUSDT`, `SOLUSDT`など、Binanceに存在するペアであれば対応可能)。
+`SYMBOL`環境変数を変更するだけで、別の通貨ペアに切り替えられます
+(例: `ETHUSDT`, `SOLUSDT`など、CoinGeckoのマッピング表にあるペア)。
 
 ```
 SYMBOL=ETHUSDT
@@ -115,7 +132,7 @@ main.py                        ローカル実行用メインループ
 app.py                         Flask Webサーバー(クラウドデプロイ用)
 backtest.py                    バックテストCLI
 improved/
-  ├── data_fetcher.py          Binance APIを使用した価格取得・過去データ取得
+  ├── data_fetcher.py          CoinGecko APIを使用した価格取得・過去データ取得
   ├── strategy.py               移動平均線クロス + RSI戦略
   ├── paper_trader.py          ペーパートレード実行エンジン(本番用、ファイル永続化あり)
   └── backtest_engine.py       バックテスト専用エンジン(インメモリ、ファイルに触れない)

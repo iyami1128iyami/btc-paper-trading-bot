@@ -1,13 +1,17 @@
 """
 バックテスト実行スクリプト
 
-Binanceの公開APIから過去データを取得し、現在の戦略(移動平均クロス+RSI)を
+CoinGeckoの公開APIから過去データを取得し、現在の戦略(移動平均クロス+RSI)を
 その期間にそのまま当てはめて成績を検証する。
 
 使い方:
     python backtest.py
-    python backtest.py --candles 1500 --interval 1h
+    python backtest.py --candles 1500
     python backtest.py --short 5 --long 25 --stop-loss 3 --take-profit 8
+
+注意: CoinGeckoはローソク足間隔を直接指定できず、取得期間(日数)に応じて
+自動で粒度(何分/時間おきか)が決まる。--candlesの本数からおおよその
+期間を逆算して取得する(improved/data_fetcher.fetch_historical_closes参照)。
 """
 
 import argparse
@@ -22,8 +26,7 @@ from improved.backtest_engine import run_backtest
 def parse_args():
     parser = argparse.ArgumentParser(description="移動平均クロス+RSI戦略のバックテスト")
     parser.add_argument("--symbol", default=config.SYMBOL, help="対象銘柄 (例: BTCUSDT)")
-    parser.add_argument("--interval", default=config.INTERVAL, help="ローソク足間隔 (例: 5m, 1h, 1d)")
-    parser.add_argument("--candles", type=int, default=1000, help="取得するローソク足の本数")
+    parser.add_argument("--candles", type=int, default=1000, help="取得する価格データの本数(目安)")
     parser.add_argument("--short", type=int, default=config.SHORT_WINDOW, help="短期移動平均の期間")
     parser.add_argument("--long", type=int, default=config.LONG_WINDOW, help="長期移動平均の期間")
     parser.add_argument("--initial-balance", type=float, default=config.INITIAL_BALANCE_USDT)
@@ -40,11 +43,10 @@ def main():
     # 戦略パラメータはconfigモジュールの値を直接書き換えて反映する
     # (strategy.generate_signal が config.SHORT_WINDOW / LONG_WINDOW を参照しているため)
     config.SYMBOL = args.symbol
-    config.INTERVAL = args.interval
     config.SHORT_WINDOW = args.short
     config.LONG_WINDOW = args.long
 
-    print(f"過去データを取得中... (銘柄={args.symbol}, 間隔={args.interval}, 本数={args.candles})")
+    print(f"過去データを取得中... (銘柄={args.symbol}, 本数={args.candles})")
     prices = fetch_historical_closes(total=args.candles)
     print(f"取得完了: {len(prices)} 本の終値データ")
 
