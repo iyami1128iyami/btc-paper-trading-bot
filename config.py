@@ -9,8 +9,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ========== Binance API 設定 ==========
+# ========== 価格取得API設定(CoinGecko) ==========
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
+# INTERVAL: CoinGecko移行に伴い現在未使用(以前のBinance APIでの名残)。
+# CoinGeckoはローソク足間隔を指定できず、取得期間に応じて自動で粒度が決まる。
 INTERVAL = os.getenv("INTERVAL", "5m")
 
 # ========== 売買パラメータ ==========
