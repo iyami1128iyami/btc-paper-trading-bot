@@ -1,35 +1,101 @@
 """
-改善版：価格データ取得モジュール
+改善版：価格データ取得モジュール(CoinGecko版)
 
-Binanceの公開API(認証不要)からローソク足データを取得する。
-リトライ機構、レート制限対応、レスポンス検証を提供する。
+CoinGeckoの公開API(APIキー不要)から価格データを取得する。
+米国などの一部リージョンからBinance APIが451エラーでブロックされる問題を
+回避するため、地域制限のないCoinGeckoに切り替えている。
+
+CoinGeckoの無料・キー無しプランはレート制限が緩くない(目安: 5〜30回/分)ため、
+FETCH_INTERVAL_SEC(デフォルト60秒=1分に1回)程度のアクセス頻度を想定している。
+もっと高頻度にしたい場合は、CoinGeckoの無料Demo APIキーを取得して
+COINGECKO_API_KEY環境変数に設定すると、レート制限が緩和される(100回/分)。
 """
 
 import logging
 import math
+import os
 import time
 
 import requests
 from requests.exceptions import ConnectionError, RequestException, Timeout
 
-from config import INTERVAL, SYMBOL
+from config import SYMBOL
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://api.binance.com/api/v3/klines"
+BASE_URL = "https://api.coingecko.com/api/v3"
 MAX_RETRY_AFTER_SEC = 300
 
+# SYMBOL (例: "BTCUSDT") から CoinGecko の (coin_id, vs_currency) への対応表。
+# 対応していないペアを使いたい場合は、COINGECKO_ID / COINGECKO_VS_CURRENCY
+# 環境変数で直接指定すれば、この表を使わずに動作する。
+SYMBOL_TO_COINGECKO = {
+    "BTCUSDT": ("bitcoin", "usd"),
+    "ETHUSDT": ("ethereum", "usd"),
+    "SOLUSDT": ("solana", "usd"),
+    "BNBUSDT": ("binancecoin", "usd"),
+    "XRPUSDT": ("ripple", "usd"),
+    "DOGEUSDT": ("dogecoin", "usd"),
+    "ADAUSDT": ("cardano", "usd"),
+    "BTCJPY": ("bitcoin", "jpy"),
+    "ETHJPY": ("ethereum", "jpy"),
+}
 
-def _retry_after_seconds(response) -> int:
-    try:
-        value = int(response.headers.get("Retry-After", "60"))
-    except (TypeError, ValueError):
-        value = 60
-    return max(0, min(value, MAX_RETRY_AFTER_SEC))
+
+def _resolve_coin():
+    """現在のSYMBOLに対応するCoinGeckoのcoin_idとvs_currencyを決定する。"""
+    override_id = os.getenv("COINGECKO_ID")
+    override_vs = os.getenv("COINGECKO_VS_CURRENCY")
+    if override_id and override_vs:
+        return override_id, override_vs
+
+    if SYMBOL in SYMBOL_TO_COINGECKO:
+        return SYMBOL_TO_COINGECKO[SYMBOL]
+
+    raise ValueError(
+        f"SYMBOL '{SYMBOL}' に対応するCoinGecko銘柄IDが見つかりません。"
+        f"環境変数 COINGECKO_ID と COINGECKO_VS_CURRENCY を設定してください"
+        f"(例: COINGECKO_ID=bitcoin, COINGECKO_VS_CURRENCY=usd)。"
+    )
+
+
+def _request_with_retry(url, params, retries, backoff_factor):
+    """429(レート制限)と一時的なネットワークエラーに対してリトライする共通処理。"""
+    api_key = os.getenv("COINGECKO_API_KEY")
+    headers = {"x-cg-demo-api-key": api_key} if api_key else {}
+
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", "60") or "60")
+                retry_after = max(1, min(retry_after, MAX_RETRY_AFTER_SEC))
+                logger.warning("CoinGeckoのレート制限に達しました。%s秒待機します", retry_after)
+                if attempt < retries - 1:
+                    time.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+            resp.raise_for_status()
+            return resp.json()
+        except (ConnectionError, Timeout, RequestException) as exc:
+            if attempt >= retries - 1:
+                logger.error("CoinGecko APIの取得に失敗しました: %s", exc)
+                raise
+            wait_time = backoff_factor**attempt
+            logger.warning("APIエラー。%.1f秒待機してリトライします: %s", wait_time, exc)
+            time.sleep(wait_time)
+
+    raise RuntimeError("CoinGecko API取得失敗")
 
 
 def fetch_klines(limit: int = 100, retries: int = 3, backoff_factor: float = 2.0):
-    """直近のローソク足の終値を古い順に取得する。"""
+    """
+    直近の価格データを取得する(古い順)。
+
+    CoinGeckoの market_chart エンドポイントは「過去X日分」でしかリクエストできず、
+    粒度(何分おきのデータか)はCoinGecko側が自動で決める(直近1日なら約5分間隔)。
+    そのため、直近1日分を取得して末尾limit件を返す。
+    """
     if limit <= 0:
         raise ValueError(f"limit must be positive: {limit}")
     if retries <= 0:
@@ -37,136 +103,97 @@ def fetch_klines(limit: int = 100, retries: int = 3, backoff_factor: float = 2.0
     if backoff_factor < 0 or not math.isfinite(backoff_factor):
         raise ValueError(f"backoff_factor must be finite and non-negative: {backoff_factor}")
 
-    params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": limit}
+    coin_id, vs_currency = _resolve_coin()
+    url = f"{BASE_URL}/coins/{coin_id}/market_chart"
+    params = {"vs_currency": vs_currency, "days": 1}
 
-    for attempt in range(retries):
+    raw = _request_with_retry(url, params, retries, backoff_factor)
+
+    prices_raw = raw.get("prices") if isinstance(raw, dict) else None
+    if not isinstance(prices_raw, list) or not prices_raw:
+        raise ValueError(f"無効なレスポンス形式: {raw}")
+
+    closes = []
+    for point in prices_raw:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
         try:
-            logger.debug("API呼び出し試行: %s/%s", attempt + 1, retries)
-            resp = requests.get(BASE_URL, params=params, timeout=10)
+            close = float(point[1])
+        except (ValueError, TypeError):
+            continue
+        if not math.isfinite(close) or close <= 0:
+            continue
+        closes.append(close)
 
-            if resp.status_code == 429:
-                retry_after = _retry_after_seconds(resp)
-                logger.warning("レート制限に達しました。%s秒待機します", retry_after)
-                if attempt < retries - 1:
-                    time.sleep(retry_after)
-                    continue
-                resp.raise_for_status()
+    if not closes:
+        raise ValueError("有効な価格データが取得できません")
 
-            resp.raise_for_status()
-            raw = resp.json()
-            if not isinstance(raw, list) or not raw:
-                raise ValueError(f"無効なレスポンス形式: {raw}")
-
-            closes = []
-            for candle in raw:
-                if not isinstance(candle, (list, tuple)) or len(candle) < 5:
-                    logger.warning("不完全なキャンドルデータをスキップ: %s", candle)
-                    continue
-                try:
-                    close = float(candle[4])
-                except (ValueError, TypeError):
-                    logger.warning("終値変換失敗: %s", candle[4])
-                    continue
-                if not math.isfinite(close) or close <= 0:
-                    logger.warning("不正な終値をスキップ: %s", candle[4])
-                    continue
-                closes.append(close)
-
-            if not closes:
-                raise ValueError("有効な終値データが取得できません")
-            return closes
-
-        except (ConnectionError, Timeout, RequestException) as exc:
-            if attempt >= retries - 1:
-                logger.error("API取得に失敗しました: %s", exc)
-                raise
-            wait_time = backoff_factor**attempt
-            logger.warning("APIエラー。%.1f秒待機してリトライします: %s", wait_time, exc)
-            time.sleep(wait_time)
-
-    raise RuntimeError("API取得失敗")
+    return closes[-limit:] if len(closes) > limit else closes
 
 
-def fetch_latest_price(retries: int = 3):
-    closes = fetch_klines(limit=1, retries=retries)
-    return closes[-1]
+def fetch_latest_price(retries: int = 3, backoff_factor: float = 2.0):
+    """最新価格を1つだけ取得する(/simple/price、軽量)。"""
+    coin_id, vs_currency = _resolve_coin()
+    url = f"{BASE_URL}/simple/price"
+    params = {"ids": coin_id, "vs_currencies": vs_currency}
+
+    raw = _request_with_retry(url, params, retries, backoff_factor)
+
+    try:
+        price = float(raw[coin_id][vs_currency])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"無効な価格レスポンス: {raw}") from exc
+
+    if not math.isfinite(price) or price <= 0:
+        raise ValueError(f"不正な価格を受信しました: {price}")
+
+    return price
 
 
 def fetch_historical_closes(total: int = 1000, retries: int = 3, backoff_factor: float = 2.0):
     """
-    バックテスト用に、古い方向へページネーションしながら大量の終値を取得する。
-    Binance APIは1リクエストあたり最大1000本までしか返さないため、
-    `endTime` を過去にずらしながら複数回に分けて取得する。
+    バックテスト用にまとまった量の過去価格を取得する(古い順)。
 
-    Returns:
-        list[float]: 終値のリスト(古い順)
+    CoinGeckoの market_chart は「過去何日分」でしかリクエストできず、
+    データの粒度は期間に応じて自動で決まる(目安):
+      - 1日以内    : 約5分間隔(最大 約288本)
+      - 2〜90日    : 約1時間間隔
+      - 91日以上   : 1日間隔
+    必要な本数(total)から、それをカバーできそうな日数を逆算してリクエストする。
     """
     if total <= 0:
         raise ValueError(f"total must be positive: {total}")
 
-    all_closes: list[float] = []
-    end_time = None
-    remaining = total
+    coin_id, vs_currency = _resolve_coin()
+    url = f"{BASE_URL}/coins/{coin_id}/market_chart"
 
-    while remaining > 0:
-        batch_limit = min(remaining, 1000)
-        params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": batch_limit}
-        if end_time is not None:
-            params["endTime"] = end_time
+    if total <= 280:
+        days = 1
+    elif total <= 24 * 89:
+        days = max(2, math.ceil(total / 24))
+    else:
+        days = total  # 1日1本として概算
 
-        raw = None
-        for attempt in range(retries):
-            try:
-                resp = requests.get(BASE_URL, params=params, timeout=10)
-                if resp.status_code == 429:
-                    retry_after = _retry_after_seconds(resp)
-                    logger.warning("レート制限に達しました。%s秒待機します", retry_after)
-                    if attempt < retries - 1:
-                        time.sleep(retry_after)
-                        continue
-                    resp.raise_for_status()
-                resp.raise_for_status()
-                raw = resp.json()
-                break
-            except (ConnectionError, Timeout, RequestException) as exc:
-                if attempt >= retries - 1:
-                    logger.error("過去データ取得に失敗しました: %s", exc)
-                    raise
-                time.sleep(backoff_factor**attempt)
+    params = {"vs_currency": vs_currency, "days": days}
+    raw = _request_with_retry(url, params, retries, backoff_factor)
 
-        if not isinstance(raw, list) or not raw:
-            break
+    prices_raw = raw.get("prices") if isinstance(raw, dict) else None
+    if not isinstance(prices_raw, list) or not prices_raw:
+        raise ValueError(f"無効なレスポンス形式: {raw}")
 
-        batch_closes = []
-        oldest_open_time = None
-        for candle in raw:
-            if not isinstance(candle, (list, tuple)) or len(candle) < 5:
-                continue
-            try:
-                close = float(candle[4])
-                open_time = int(candle[0])
-            except (ValueError, TypeError):
-                continue
-            if not math.isfinite(close) or close <= 0:
-                continue
-            batch_closes.append(close)
-            if oldest_open_time is None:
-                oldest_open_time = open_time
+    closes = []
+    for point in prices_raw:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            continue
+        try:
+            close = float(point[1])
+        except (ValueError, TypeError):
+            continue
+        if not math.isfinite(close) or close <= 0:
+            continue
+        closes.append(close)
 
-        if not batch_closes:
-            break
+    if not closes:
+        raise ValueError("有効な価格データが取得できません")
 
-        # 取得したバッチは新しい順ではなく古い順で返ってくるので、先頭に追加していく
-        all_closes = batch_closes + all_closes
-        remaining -= len(batch_closes)
-
-        if oldest_open_time is None:
-            break
-        # 次のリクエストは、このバッチの最も古いローソク足より前を取得する
-        end_time = oldest_open_time - 1
-
-        if len(raw) < batch_limit:
-            # これ以上過去のデータが存在しない
-            break
-
-    return all_closes[-total:] if len(all_closes) > total else all_closes
+    return closes[-total:] if len(closes) > total else closes
