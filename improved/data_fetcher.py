@@ -68,7 +68,11 @@ def _request_with_retry(url, params, retries, backoff_factor):
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=10)
             if resp.status_code == 429:
-                retry_after = int(resp.headers.get("Retry-After", "60") or "60")
+                try:
+                    retry_after = int(resp.headers.get("Retry-After", "60") or "60")
+                except (TypeError, ValueError):
+                    # Retry-Afterが日付形式など数値以外で返ってくる場合に備えたフォールバック
+                    retry_after = 60
                 retry_after = max(1, min(retry_after, MAX_RETRY_AFTER_SEC))
                 logger.warning("CoinGeckoのレート制限に達しました。%s秒待機します", retry_after)
                 if attempt < retries - 1:
@@ -76,7 +80,11 @@ def _request_with_retry(url, params, retries, backoff_factor):
                     continue
                 resp.raise_for_status()
             resp.raise_for_status()
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError as exc:
+                # resp.json()のデコード失敗(JSONDecodeErrorはValueErrorのサブクラス)もリトライ対象にする
+                raise RequestException(f"CoinGeckoからのレスポンスがJSONとして解釈できません: {exc}") from exc
         except (ConnectionError, Timeout, RequestException) as exc:
             if attempt >= retries - 1:
                 logger.error("CoinGecko APIの取得に失敗しました: %s", exc)
