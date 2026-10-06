@@ -80,6 +80,31 @@ CoinGeckoに切り替えました。
 - 一覧にないペアを使いたい場合は、`COINGECKO_ID`と`COINGECKO_VS_CURRENCY`の
   環境変数で直接指定できます(例: `COINGECKO_ID=polkadot`, `COINGECKO_VS_CURRENCY=usd`)
 
+## 通知(Telegram)
+
+ポジションの変化(BUY/SELL)やエラーの発生・復旧をTelegramに通知できます(任意機能)。
+
+**設定方法**
+1. Telegramで [@BotFather](https://t.me/BotFather) を開き、`/newbot` でBotを作成(名前を聞かれるので好きに入力)
+2. 発行される「トークン」(`123456:ABC-DEF...`のような文字列)をコピー → `TELEGRAM_BOT_TOKEN`
+3. 作成したBotとのトーク画面を開き、何か適当なメッセージを送る(例: 「test」)
+4. ブラウザで以下にアクセスし、`"chat":{"id":...}` の数値(`chat_id`)を確認する
+
+   ```
+   https://api.telegram.org/bot<取得したトークン>/getUpdates
+   ```
+
+5. その数値を `TELEGRAM_CHAT_ID` に設定
+
+環境変数 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` のどちらかが未設定の場合、通知機能は何もせず静かに無効化されます(エラーにはなりません)。
+
+**通知されるタイミング**
+- 💰 BUY/SELLが成立した時(価格・数量・損益を含む)
+- 🚨 価格取得や取引処理でエラーが発生した時(連続エラー中は最初の1回だけ通知し、スパムを防止)
+- ✅ エラーから復旧した時
+- 🚨 状態ファイル(`state.json`)が破損していて初期状態にリセットした時
+- 🔥 起動そのものに失敗した時
+
 ## 設定
 
 `.env.example`を参考に、`.env`ファイルを作成して設定値をカスタマイズしてください。
@@ -93,6 +118,8 @@ CoinGeckoに切り替えました。
 - `LONG_WINDOW`: 長期移動平均の期間
 - `COINGECKO_ID` / `COINGECKO_VS_CURRENCY`: マッピング表にない銘柄を使う場合に指定
 - `COINGECKO_API_KEY`: レート制限を緩和したい場合(任意)
+- `RSI_PERIOD`: RSIの計算期間(デフォルト: 14。LONG_WINDOW未満にすると警告が出ます)
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`: Telegram通知を使う場合に設定(任意、上記「通知」セクション参照)
 
 ## 取引ペアの切り替え
 
