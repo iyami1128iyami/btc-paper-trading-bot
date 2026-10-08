@@ -51,9 +51,18 @@ if not 0 < TRADE_RATIO <= 1:
 SHORT_WINDOW = _get_int("SHORT_WINDOW", "5")  # 短期移動平均の期間
 LONG_WINDOW = _get_int("LONG_WINDOW", "20")  # 長期移動平均の期間
 RSI_PERIOD = _get_int("RSI_PERIOD", "14")  # RSIの計算期間
+ADX_PERIOD = _get_int("ADX_PERIOD", "14")  # ADX(トレンド強度)の計算期間
+ADX_THRESHOLD = _get_float("ADX_THRESHOLD", "25.0")  # この値未満はレンジ相場とみなし取引を見送る
+CONFIRMATION_BARS = _get_int("CONFIRMATION_BARS", "2")  # シグナルが継続しているか確認する本数(ダマシ対策)
 
 if SHORT_WINDOW <= 0 or LONG_WINDOW <= 0:
     raise RuntimeError("SHORT_WINDOW / LONG_WINDOW は正の整数にしてください")
+if ADX_PERIOD <= 0:
+    raise RuntimeError(f"ADX_PERIOD は正の整数にしてください(現在の値: {ADX_PERIOD})")
+if not 0 <= ADX_THRESHOLD <= 100:
+    raise RuntimeError(f"ADX_THRESHOLD は0〜100の範囲にしてください(現在の値: {ADX_THRESHOLD})")
+if CONFIRMATION_BARS < 1:
+    raise RuntimeError(f"CONFIRMATION_BARS は1以上の整数にしてください(現在の値: {CONFIRMATION_BARS})")
 if SHORT_WINDOW >= LONG_WINDOW:
     raise RuntimeError(
         f"SHORT_WINDOW({SHORT_WINDOW})はLONG_WINDOW({LONG_WINDOW})より小さくしてください"
