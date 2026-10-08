@@ -9,7 +9,7 @@ import shutil
 import threading
 from datetime import datetime, timezone
 
-from config import INITIAL_BALANCE_USDT, LOG_FILE, STATE_FILE, SYMBOL, TRADE_RATIO
+from config import INITIAL_BALANCE_USDT, LOG_FILE, MIN_PROFIT_PCT_TO_EXIT, STATE_FILE, SYMBOL, TRADE_RATIO
 from improved.notifier import notify
 
 logger = logging.getLogger(__name__)
@@ -155,7 +155,19 @@ class PaperTrader:
                 if signal == "BUY" and self.state["position"] == "NONE":
                     return self._execute_buy(price, "Signal")
                 if signal == "SELL" and self.state["position"] == "LONG":
-                    return self._execute_sell(price, "Signal")
+                    # 通常シグナルでの決済は、最低限の利益(往復手数料の目安)が
+                    # 出ている場合のみ実行する。ストップロス/テイクプロフィットは
+                    # 上のブロックで独立して判定済みなので、ここでの見送りが
+                    # 損失の拡大には繋がらない(損切りラインに達すれば別途発動する)。
+                    change = (price - self.entry_price) / self.entry_price * 100
+                    if change >= MIN_PROFIT_PCT_TO_EXIT:
+                        return self._execute_sell(price, "Signal")
+                    logger.info(
+                        "SELLシグナルが出ましたが、含み益(%.2f%%)がMIN_PROFIT_PCT_TO_EXIT(%.2f%%)"
+                        "未満のため決済を見送ります",
+                        change, MIN_PROFIT_PCT_TO_EXIT,
+                    )
+                    return f"HOLD: SELLシグナルだが利益不足({change:+.2f}%)のため見送り"
                 return "HOLD: 何もしない"
             except OSError as exc:
                 # ディスク書き込み失敗など。メモリ上の状態は書き換わっていないので
