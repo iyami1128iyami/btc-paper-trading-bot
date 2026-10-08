@@ -54,6 +54,9 @@ RSI_PERIOD = _get_int("RSI_PERIOD", "14")  # RSIの計算期間
 ADX_PERIOD = _get_int("ADX_PERIOD", "14")  # ADX(トレンド強度)の計算期間
 ADX_THRESHOLD = _get_float("ADX_THRESHOLD", "25.0")  # この値未満はレンジ相場とみなし取引を見送る
 CONFIRMATION_BARS = _get_int("CONFIRMATION_BARS", "2")  # シグナルが継続しているか確認する本数(ダマシ対策)
+# 通常シグナルでの決済に必要な最低利益(%)。往復手数料で負けないための下限の目安。
+# ストップロス/テイクプロフィットはこの値と独立して機能する(損切りは利益の有無を問わず発動する)。
+MIN_PROFIT_PCT_TO_EXIT = _get_float("MIN_PROFIT_PCT_TO_EXIT", "0.2")
 
 if SHORT_WINDOW <= 0 or LONG_WINDOW <= 0:
     raise RuntimeError("SHORT_WINDOW / LONG_WINDOW は正の整数にしてください")
@@ -63,6 +66,8 @@ if not 0 <= ADX_THRESHOLD <= 100:
     raise RuntimeError(f"ADX_THRESHOLD は0〜100の範囲にしてください(現在の値: {ADX_THRESHOLD})")
 if CONFIRMATION_BARS < 1:
     raise RuntimeError(f"CONFIRMATION_BARS は1以上の整数にしてください(現在の値: {CONFIRMATION_BARS})")
+if MIN_PROFIT_PCT_TO_EXIT < 0:
+    raise RuntimeError(f"MIN_PROFIT_PCT_TO_EXIT は0以上にしてください(現在の値: {MIN_PROFIT_PCT_TO_EXIT})")
 if SHORT_WINDOW >= LONG_WINDOW:
     raise RuntimeError(
         f"SHORT_WINDOW({SHORT_WINDOW})はLONG_WINDOW({LONG_WINDOW})より小さくしてください"
