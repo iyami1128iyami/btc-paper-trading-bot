@@ -84,6 +84,12 @@ if LONG_WINDOW < RSI_PERIOD:
         LONG_WINDOW, RSI_PERIOD,
     )
 
+# ========== 永続化 ==========
+# 設定すると、state(残高・ポジション)をローカルファイルの代わりにRender Key Value(Redis)
+# に保存する。Renderは再デプロイのたびにディスクを初期化するため、これを設定しないと
+# デプロイのたびにポジションが失われてしまう。未設定ならローカルファイルにフォールバックする。
+REDIS_URL = os.getenv("REDIS_URL")
+
 # ========== ファイルパス ==========
 # ペアごとに状態・ログを分離する(切り替え時に別ペアの残高と混ざらないようにするため)
 LOG_FILE = os.getenv("LOG_FILE", f"trade_log_{SYMBOL}.csv")
