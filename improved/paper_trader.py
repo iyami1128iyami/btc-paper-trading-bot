@@ -15,7 +15,17 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from config import INITIAL_BALANCE_USDT, LOG_FILE, MIN_PROFIT_PCT_TO_EXIT, REDIS_URL, STATE_FILE, SYMBOL, TRADE_RATIO
+from config import (
+    INITIAL_BALANCE_USDT,
+    LOG_FILE,
+    MIN_PROFIT_PCT_TO_EXIT,
+    REDIS_URL,
+    STATE_FILE,
+    SYMBOL,
+    TRADE_RATIO,
+    TRAILING_STOP_ACTIVATION_PCT,
+    TRAILING_STOP_PCT,
+)
 from improved.notifier import notify
 
 logger = logging.getLogger(__name__)
@@ -50,6 +60,7 @@ class PaperTrader:
             "asset_balance": 0.0,
             "position": "NONE",
             "entry_price": None,
+            "highest_price": None,  # トレーリングストップ用: 保有中に記録した最高値
         }
 
     def _validate_state(self, state):
@@ -60,6 +71,7 @@ class PaperTrader:
             state["asset_balance"] = state.pop("btc_balance")
         state.setdefault("symbol", SYMBOL)
         state.setdefault("entry_price", None)
+        state.setdefault("highest_price", None)  # 旧バージョンの保存データとの後方互換
 
         if state.get("position") not in {"NONE", "LONG"}:
             raise ValueError("invalid position")
@@ -74,6 +86,11 @@ class PaperTrader:
             raise ValueError("invalid entry_price")
         if state["position"] == "LONG" and entry_price is None:
             raise ValueError("LONG position requires entry_price")
+        highest_price = state["highest_price"]
+        if highest_price is not None and (
+            not isinstance(highest_price, (int, float)) or not math.isfinite(highest_price) or highest_price <= 0
+        ):
+            raise ValueError("invalid highest_price")
         return state
 
     # ---------- 低レベルの読み書き(Redis / ファイルを切り替え) ----------
@@ -201,17 +218,40 @@ class PaperTrader:
         except OSError as exc:
             logger.warning("取引は成立しましたが、CSVログへの記録に失敗しました: %s", exc)
 
+    def _update_highest_price(self, new_highest):
+        """トレーリングストップ用の最高値だけを更新する(取引ではない)。"""
+        new_state = dict(self.state)
+        new_state["highest_price"] = new_highest
+        self._write_raw(json.dumps(new_state, indent=2))
+        self.state = new_state
+
     def execute(self, signal: str, price: float) -> str:
         if not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
             raise ValueError(f"price must be a finite positive number: {price}")
         with self._lock:
             try:
                 if self.state["position"] == "LONG" and self.entry_price is not None:
+                    # 保有中の最高値を更新する(トレーリングストップの基準)。
+                    # 取引ではないので、ログには残さずstate自体だけ更新する。
+                    highest = self.state.get("highest_price") or self.entry_price
+                    if price > highest:
+                        highest = price
+                        self._update_highest_price(highest)
+
                     change = (price - self.entry_price) / self.entry_price * 100
                     if change >= self.take_profit_pct:
                         return self._execute_sell(price, f"TP {change:.2f}%")
                     if change <= -self.stop_loss_pct:
                         return self._execute_sell(price, f"SL {change:.2f}%")
+
+                    peak_change = (highest - self.entry_price) / self.entry_price * 100
+                    if peak_change >= TRAILING_STOP_ACTIVATION_PCT:
+                        drawdown_from_peak = (highest - price) / highest * 100
+                        if drawdown_from_peak >= TRAILING_STOP_PCT:
+                            return self._execute_sell(
+                                price,
+                                f"TS 最高値{highest:,.2f}から-{drawdown_from_peak:.2f}% (含み益{change:+.2f}%)",
+                            )
                 if signal == "BUY" and self.state["position"] == "NONE":
                     return self._execute_buy(price, "Signal")
                 if signal == "SELL" and self.state["position"] == "LONG":
@@ -245,6 +285,7 @@ class PaperTrader:
         new_state["asset_balance"] += amount
         new_state["position"] = "LONG"
         new_state["entry_price"] = price
+        new_state["highest_price"] = price
 
         self._commit(new_state, price, "BUY", price, amount, reason)
         message = f"BUY: {amount:.6f} {SYMBOL} @ {price:,.2f} ({reason})"
@@ -263,6 +304,7 @@ class PaperTrader:
         new_state["asset_balance"] = 0.0
         new_state["position"] = "NONE"
         new_state["entry_price"] = None
+        new_state["highest_price"] = None
 
         self._commit(new_state, None, "SELL", price, amount, reason)
         message = (
