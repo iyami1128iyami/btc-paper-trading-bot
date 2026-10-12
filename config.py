@@ -55,8 +55,16 @@ ADX_PERIOD = _get_int("ADX_PERIOD", "14")  # ADX(トレンド強度)の計算期
 ADX_THRESHOLD = _get_float("ADX_THRESHOLD", "25.0")  # この値未満はレンジ相場とみなし取引を見送る
 CONFIRMATION_BARS = _get_int("CONFIRMATION_BARS", "2")  # シグナルが継続しているか確認する本数(ダマシ対策)
 # 通常シグナルでの決済に必要な最低利益(%)。往復手数料で負けないための下限の目安。
-# ストップロス/テイクプロフィットはこの値と独立して機能する(損切りは利益の有無を問わず発動する)。
-MIN_PROFIT_PCT_TO_EXIT = _get_float("MIN_PROFIT_PCT_TO_EXIT", "0.2")
+# 多くの取引所のテイカー手数料(片道0.1〜0.15%程度)を踏まえ、往復分を確実に
+# 上回るよう0.3%をデフォルトにしている。ストップロス/テイクプロフィット/
+# トレーリングストップはこの値と独立して機能する(利益の有無を問わず発動する)。
+MIN_PROFIT_PCT_TO_EXIT = _get_float("MIN_PROFIT_PCT_TO_EXIT", "0.3")
+
+# トレーリングストップ: 含み益がTRAILING_STOP_ACTIVATION_PCTに達すると有効化され、
+# 以降は「最高値からTRAILING_STOP_PCT下落」で自動決済する。伸びているトレンドには
+# 乗り続けつつ、反転したら早めに利益を確定させるための仕組み。
+TRAILING_STOP_ACTIVATION_PCT = _get_float("TRAILING_STOP_ACTIVATION_PCT", "1.0")
+TRAILING_STOP_PCT = _get_float("TRAILING_STOP_PCT", "0.5")
 
 if SHORT_WINDOW <= 0 or LONG_WINDOW <= 0:
     raise RuntimeError("SHORT_WINDOW / LONG_WINDOW は正の整数にしてください")
@@ -68,6 +76,12 @@ if CONFIRMATION_BARS < 1:
     raise RuntimeError(f"CONFIRMATION_BARS は1以上の整数にしてください(現在の値: {CONFIRMATION_BARS})")
 if MIN_PROFIT_PCT_TO_EXIT < 0:
     raise RuntimeError(f"MIN_PROFIT_PCT_TO_EXIT は0以上にしてください(現在の値: {MIN_PROFIT_PCT_TO_EXIT})")
+if TRAILING_STOP_ACTIVATION_PCT < 0:
+    raise RuntimeError(
+        f"TRAILING_STOP_ACTIVATION_PCT は0以上にしてください(現在の値: {TRAILING_STOP_ACTIVATION_PCT})"
+    )
+if TRAILING_STOP_PCT <= 0:
+    raise RuntimeError(f"TRAILING_STOP_PCT は正の数値にしてください(現在の値: {TRAILING_STOP_PCT})")
 if SHORT_WINDOW >= LONG_WINDOW:
     raise RuntimeError(
         f"SHORT_WINDOW({SHORT_WINDOW})はLONG_WINDOW({LONG_WINDOW})より小さくしてください"
