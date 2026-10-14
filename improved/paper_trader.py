@@ -44,8 +44,11 @@ else:
 
 class PaperTrader:
     def __init__(self, stop_loss_pct: float = 5.0, take_profit_pct: float = 10.0):
-        if not 0 <= TRADE_RATIO <= 1:
-            raise ValueError("TRADE_RATIO must be between 0 and 1")
+        # config.pyの検証条件(0 < TRADE_RATIO <= 1)と一致させておく。
+        # config.pyが先に検証しているため実際にはここで引っかかることはないが、
+        # PaperTraderを単体で使う場合にも同じ条件で守られるようにする。
+        if not 0 < TRADE_RATIO <= 1:
+            raise ValueError("TRADE_RATIO must be greater than 0 and at most 1")
         self._lock = threading.RLock()
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
@@ -149,7 +152,10 @@ class PaperTrader:
             # 「消えたことに気づかないまま運用する」最悪のケースなので、ここは
             # 明確に起動を止める(ファイルへのフォールバックは意図的に行わない)。
             logger.exception("状態ストアへの接続に失敗しました: %s", exc)
-            notify(f"🔥 状態ストア(Redis)への接続に失敗しました。起動を中止します: {exc}", level="error")
+            notify(
+                f"🔥 状態ストア(Redis)への接続に失敗しました。起動を中止します: {exc}",
+                level="error", blocking=True,
+            )
             raise RuntimeError(f"状態ストアに接続できません: {exc}") from exc
 
         if raw is None:
@@ -178,7 +184,7 @@ class PaperTrader:
                 f"保存されている状態のペア({state['symbol']})と現在の設定のペア({SYMBOL})が一致しません。"
                 f"STATE_FILE/LOG_FILEを分けるか、意図的な切り替えなら保存データを削除してください。"
             )
-            notify(f"起動を中止しました: {message}", level="error")
+            notify(f"起動を中止しました: {message}", level="error", blocking=True)
             raise RuntimeError(message)
 
         return state
@@ -217,6 +223,7 @@ class PaperTrader:
             self._append_log_row(new_state, action, price, amount, reason)
         except OSError as exc:
             logger.warning("取引は成立しましたが、CSVログへの記録に失敗しました: %s", exc)
+            notify(f"取引は成立しましたが、CSVログへの記録に失敗しました: {exc}", level="warning")
 
     def _update_highest_price(self, new_highest):
         """トレーリングストップ用の最高値だけを更新する(取引ではない)。"""
@@ -233,10 +240,16 @@ class PaperTrader:
                 if self.state["position"] == "LONG" and self.entry_price is not None:
                     # 保有中の最高値を更新する(トレーリングストップの基準)。
                     # 取引ではないので、ログには残さずstate自体だけ更新する。
+                    # この更新自体の失敗は「取引の失敗」とは別物として扱う
+                    # (以降のTP/SL/TS判定には今サイクルで計算したhighestをそのまま使うので、
+                    # 永続化が一時的に失敗しても次サイクルで再試行されるだけで実害は小さい)。
                     highest = self.state.get("highest_price") or self.entry_price
                     if price > highest:
                         highest = price
-                        self._update_highest_price(highest)
+                        try:
+                            self._update_highest_price(highest)
+                        except Exception as exc:
+                            logger.warning("最高値の更新(永続化)に失敗しました。次サイクルで再試行します: %s", exc)
 
                     change = (price - self.entry_price) / self.entry_price * 100
                     if change >= self.take_profit_pct:
