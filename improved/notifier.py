@@ -39,7 +39,7 @@ _EMOJI = {
 def _send(text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
+        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=5)
         resp.raise_for_status()
         return True
     except Exception as exc:  # 通知自体の失敗で本体を止めないよう、意図的に広く捕捉する
