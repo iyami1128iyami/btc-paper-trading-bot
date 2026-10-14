@@ -25,7 +25,10 @@ except Exception:
     # 原因調査の手がかりをTelegramにも残してから、通常通り例外を再送出してプロセスを終了させる
     # (中途半端な状態で起動を続けるより、明確に落として気づけるようにする)。
     logger.exception("PaperTraderの初期化に失敗しました。起動を中止します。")
-    notify("🔥 起動に失敗しました。PaperTraderの初期化でエラーが発生しています。ログを確認してください。", level="error")
+    notify(
+        "🔥 起動に失敗しました。PaperTraderの初期化でエラーが発生しています。ログを確認してください。",
+        level="error", blocking=True,
+    )
     raise
 
 latest_status = {"updated_at": None, "price": None, "signal": None, "action": None, "portfolio_value": None}

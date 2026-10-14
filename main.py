@@ -2,7 +2,6 @@
 
 import logging
 import time
-from datetime import datetime
 
 from config import FETCH_INTERVAL_SEC
 from improved.data_fetcher import fetch_klines
@@ -16,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 def run_loop():
     trader = PaperTrader()
-    print("ペーパートレードを開始します。Ctrl+Cで停止できます。")
+    logger.info("ペーパートレードを開始します。Ctrl+Cで停止できます。")
     had_error = False
     while True:
         try:
@@ -25,13 +24,15 @@ def run_loop():
             signal = generate_signal(prices)
             result = trader.execute(signal, current_price)
             value = trader.portfolio_value(current_price)
-            print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 価格: {current_price:.2f} | シグナル: {signal} | {result} | 評価資産: {value:.2f} USDT")
+            logger.info(
+                "価格: %.2f | シグナル: %s | %s | 評価資産: %.2f USDT",
+                current_price, signal, result, value,
+            )
             if had_error:
                 notify("✅ エラーから復旧しました。", level="recovery")
                 had_error = False
         except Exception as exc:
             logger.exception("エラーが発生しました")
-            print(f"エラーが発生しました: {exc}")
             if not had_error:
                 notify(f"🚨 エラーが発生しました: {exc}", level="error")
                 had_error = True

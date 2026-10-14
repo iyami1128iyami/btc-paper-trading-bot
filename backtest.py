@@ -18,8 +18,8 @@ import argparse
 import csv
 
 import config
-from improved.data_fetcher import fetch_historical_closes
-from improved.strategy import generate_signal
+import improved.data_fetcher as data_fetcher
+import improved.strategy as strategy
 from improved.backtest_engine import run_backtest
 
 
@@ -40,19 +40,26 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # 戦略パラメータはconfigモジュールの値を直接書き換えて反映する
-    # (strategy.generate_signal が config.SHORT_WINDOW / LONG_WINDOW を参照しているため)
+    # 戦略パラメータを反映する。
+    # 注意: `from config import SHORT_WINDOW` のようにimportした側(strategy.py /
+    # data_fetcher.py)は、import時点の値を自分のモジュール名前空間にコピーして
+    # 持っているため、config.SHORT_WINDOW をここで書き換えただけでは反映されない
+    # (Pythonの名前束縛の仕様)。そのため、既にimport済みのモジュール自身の
+    # 属性も直接書き換える必要がある。
     config.SYMBOL = args.symbol
     config.SHORT_WINDOW = args.short
     config.LONG_WINDOW = args.long
+    data_fetcher.SYMBOL = args.symbol
+    strategy.SHORT_WINDOW = args.short
+    strategy.LONG_WINDOW = args.long
 
     print(f"過去データを取得中... (銘柄={args.symbol}, 本数={args.candles})")
-    prices = fetch_historical_closes(total=args.candles)
+    prices = data_fetcher.fetch_historical_closes(total=args.candles)
     print(f"取得完了: {len(prices)} 本の終値データ")
 
     result = run_backtest(
         prices=prices,
-        generate_signal_fn=generate_signal,
+        generate_signal_fn=strategy.generate_signal,
         long_window=args.long,
         initial_balance=args.initial_balance,
         trade_ratio=args.trade_ratio,
