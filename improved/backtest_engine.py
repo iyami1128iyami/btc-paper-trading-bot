@@ -10,6 +10,12 @@
 import math
 from dataclasses import dataclass, field
 
+import config
+
+# config.X の形で毎回参照する(`from config import X` にすると、backtest.py が
+# CLIオプションでconfigの値を書き換えても反映されない問題があるため、意図的に
+# この参照方法にしている。詳しくはbacktest.pyのコメント参照)。
+
 
 @dataclass
 class Trade:
@@ -83,8 +89,11 @@ class BacktestResult:
 class BacktestTrader:
     """
     ファイルI/Oを行わない、バックテスト専用のシンプルな売買シミュレーター。
-    improved.paper_trader.PaperTrader と同じロジック(ストップロス/テイクプロフィット)を
-    インメモリで再現する。
+    improved.paper_trader.PaperTrader と同じロジック(ストップロス/テイクプロフィット/
+    トレーリングストップ/最低利益チェック)をインメモリで再現する。
+
+    注意: PaperTrader側のロジックを変更した場合、ここも合わせて更新しないと
+    バックテストの結果が実運用と食い違う(=バックテストの意味が薄れる)ので要注意。
     """
 
     def __init__(
@@ -100,6 +109,7 @@ class BacktestTrader:
         self.asset_balance = 0.0
         self.position = "NONE"
         self.entry_price = None
+        self.highest_price = None
         self.trade_ratio = trade_ratio
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
@@ -107,6 +117,9 @@ class BacktestTrader:
 
     def step(self, signal: str, price: float, index: int):
         if self.position == "LONG" and self.entry_price is not None:
+            if self.highest_price is None or price > self.highest_price:
+                self.highest_price = price
+
             change = (price - self.entry_price) / self.entry_price * 100
             if change >= self.take_profit_pct:
                 self._sell(price, index, f"TP {change:.2f}%")
@@ -115,10 +128,20 @@ class BacktestTrader:
                 self._sell(price, index, f"SL {change:.2f}%")
                 return
 
+            peak_change = (self.highest_price - self.entry_price) / self.entry_price * 100
+            if peak_change >= config.TRAILING_STOP_ACTIVATION_PCT:
+                drawdown_from_peak = (self.highest_price - price) / self.highest_price * 100
+                if drawdown_from_peak >= config.TRAILING_STOP_PCT:
+                    self._sell(price, index, f"TS -{drawdown_from_peak:.2f}% (含み益{change:+.2f}%)")
+                    return
+
         if signal == "BUY" and self.position == "NONE":
             self._buy(price, index, "Signal")
         elif signal == "SELL" and self.position == "LONG":
-            self._sell(price, index, "Signal")
+            change = (price - self.entry_price) / self.entry_price * 100
+            if change >= config.MIN_PROFIT_PCT_TO_EXIT:
+                self._sell(price, index, "Signal")
+            # 利益不足の場合、PaperTrader同様に決済を見送る(保有継続)
 
     def _buy(self, price, index, reason):
         spend = self.usdt_balance * self.trade_ratio
@@ -127,6 +150,7 @@ class BacktestTrader:
         self.asset_balance += amount
         self.position = "LONG"
         self.entry_price = price
+        self.highest_price = price
         self.trades.append(Trade("BUY", index, price, amount, reason))
 
     def _sell(self, price, index, reason):
@@ -138,6 +162,7 @@ class BacktestTrader:
         self.asset_balance = 0.0
         self.position = "NONE"
         self.entry_price = None
+        self.highest_price = None
         self.trades.append(Trade("SELL", index, price, amount, reason, pnl=pnl))
 
     def portfolio_value(self, price: float) -> float:
