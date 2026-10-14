@@ -12,6 +12,7 @@ from improved.data_fetcher import fetch_klines
 from improved.strategy import generate_signal
 from improved.paper_trader import PaperTrader
 from improved.notifier import notify
+from improved.leader_lock import try_acquire_or_renew
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -38,6 +39,14 @@ status_lock = threading.Lock()
 def _trading_cycle(had_error_flag):
     """1回分の価格取得〜売買判定〜実行。成功/失敗に応じて通知の要否を判断する。"""
     global latest_status
+
+    # 複数プロセス(gunicornワーカーなど)が同時に動いていても、取引を実行するのは
+    # リーダー権を持つ1プロセスだけにする(二重発注・状態競合の防止)。
+    # Redis未使用時は常にTrueが返るので、通常運用では何も変わらない。
+    if not try_acquire_or_renew(ttl_sec=FETCH_INTERVAL_SEC * 3):
+        logger.info("他のプロセスが取引ループのリーダーのため、このサイクルは見送ります")
+        return
+
     prices = fetch_klines(limit=100)
     current_price = prices[-1]
     signal = generate_signal(prices)
