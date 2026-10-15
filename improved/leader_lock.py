@@ -15,6 +15,7 @@ import socket
 import uuid
 
 from config import REDIS_URL, SYMBOL
+from improved.notifier import notify
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ if REDIS_URL:
         REDIS_URL, decode_responses=True, socket_timeout=5, socket_connect_timeout=5
     )
 
+# Redis障害中に毎サイクル通知が飛ぶのを防ぐためのフラグ(発生時・復旧時の1回だけ通知する)
+_redis_error_notified = False
+
 
 def try_acquire_or_renew(ttl_sec: int) -> bool:
     """
@@ -40,6 +44,7 @@ def try_acquire_or_renew(ttl_sec: int) -> bool:
             Redis未使用(REDIS_URL未設定)の場合は常にTrue。
             Redis接続エラー時は安全側に倒してFalse(今回のサイクルは見送る)。
     """
+    global _redis_error_notified
     if _redis_client is None:
         return True
     try:
@@ -47,13 +52,25 @@ def try_acquire_or_renew(ttl_sec: int) -> bool:
         if current == _WORKER_ID:
             # 既に自分がリーダー → 有効期限を延長するだけ
             _redis_client.expire(_LOCK_KEY, ttl_sec)
-            return True
-        if current is None:
+            result = True
+        elif current is None:
             # 誰も持っていない(未設定 or 前のリーダーが期限切れで消えた) → 取得を試みる
-            acquired = _redis_client.set(_LOCK_KEY, _WORKER_ID, nx=True, ex=ttl_sec)
-            return bool(acquired)
-        # 他のプロセスが既にリーダー
-        return False
+            result = bool(_redis_client.set(_LOCK_KEY, _WORKER_ID, nx=True, ex=ttl_sec))
+        else:
+            # 他のプロセスが既にリーダー
+            result = False
+
+        if _redis_error_notified:
+            notify("✅ リーダーロック用Redisへの接続が復旧しました。", level="recovery")
+            _redis_error_notified = False
+        return result
     except Exception as exc:
         logger.warning("リーダーロックの確認に失敗しました。安全側として今回のサイクルは見送ります: %s", exc)
+        if not _redis_error_notified:
+            # 障害中ずっと通知が飛び続けるのを防ぐため、発生時に1回だけ知らせる。
+            notify(
+                f"🚨 リーダーロック用Redisへの接続に失敗しました。復旧するまで取引を一時停止します: {exc}",
+                level="error",
+            )
+            _redis_error_notified = True
         return False
