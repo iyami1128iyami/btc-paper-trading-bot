@@ -124,21 +124,24 @@ def state():
 
 def _should_start_trading_loop() -> bool:
     """
-    本番運用(gunicorn)やdebug=Falseでのローカル実行では、このモジュールは
-    1回しか読み込まれないため常にスレッドを起動してよい。
+    本番運用(gunicorn)やdebug=Falseでのローカル実行(今の`python app.py`はこちら)では、
+    このモジュールは1回しか読み込まれないため、常にスレッドを起動してよい
+    (`app.debug`がFalseの場合)。
 
-    一方、Flask/Werkzeugの自動リローダー(debug=Trueでの`python app.py`実行時)を
-    使うと、親プロセスと子プロセスの両方でこのモジュールが読み込まれ、
-    取引ループのスレッドが二重に起動してしまう。実際にリクエストを処理するのは
-    子プロセス側(WERKZEUG_RUN_MAIN="true")だけなので、リローダーが有効な場合は
-    そちらでのみ起動する。
+    一方、Flask/Werkzeugの自動リローダー(`app.run(debug=True)`を使った場合)では、
+    親プロセスと子プロセスの両方でこのモジュールが読み込まれ、取引ループの
+    スレッドが二重に起動してしまう。実際にリクエストを処理する子プロセス側
+    (WERKZEUG_RUN_MAIN="true")だけで起動するよう、`app.debug`が真の場合に限って
+    この環境変数を確認する(`app.debug`がFalseなら、WERKZEUG_RUN_MAINの値に
+    関わらず単一プロセスでの実行とみなし、常に起動する)。
 
     なお、二重に起動してしまった場合でも実際の売買はleader_lock(Redis使用時)で
     1プロセスに制限されるため、これは「無駄なスレッド・ログの重複」を防ぐための
     追加の防御(Redis未使用時はこちらが唯一の防御線になる)。
     """
-    werkzeug_run_main = os.environ.get("WERKZEUG_RUN_MAIN")
-    return werkzeug_run_main in (None, "true")
+    if not app.debug:
+        return True
+    return os.environ.get("WERKZEUG_RUN_MAIN") == "true"
 
 
 if _should_start_trading_loop():
