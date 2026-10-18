@@ -8,10 +8,9 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify
 
-from config import FETCH_INTERVAL_SEC, SYMBOL
+from config import FETCH_INTERVAL_SEC, SYMBOL, TRADING_MODE
 from improved.data_fetcher import fetch_klines
 from improved.strategy import generate_signal
-from improved.paper_trader import PaperTrader
 from improved.notifier import notify
 from improved.leader_lock import try_acquire_or_renew
 
@@ -21,14 +20,20 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 try:
-    trader = PaperTrader()
+    if TRADING_MODE == "demo":
+        from improved.demo_trader import DemoTrader
+        trader = DemoTrader()
+        logger.info("[DEMO] Binance Testnetに接続して取引します")
+    else:
+        from improved.paper_trader import PaperTrader
+        trader = PaperTrader()
 except Exception:
     # ここで失敗するとgunicornのワーカーがそもそも起動できず、/pingすら応答しなくなる。
     # 原因調査の手がかりをTelegramにも残してから、通常通り例外を再送出してプロセスを終了させる
     # (中途半端な状態で起動を続けるより、明確に落として気づけるようにする)。
-    logger.exception("PaperTraderの初期化に失敗しました。起動を中止します。")
+    logger.exception("トレーダーの初期化に失敗しました。起動を中止します。")
     notify(
-        "🔥 起動に失敗しました。PaperTraderの初期化でエラーが発生しています。ログを確認してください。",
+        f"🔥 起動に失敗しました。トレーダー({TRADING_MODE})の初期化でエラーが発生しています。ログを確認してください。",
         level="error", blocking=True,
     )
     raise
@@ -103,7 +108,9 @@ def run_trading_loop_with_watchdog():
 
 @app.route("/")
 def index():
-    return jsonify({"service": "btc-paper-trading-bot", "symbol": SYMBOL, "status": "running"})
+    return jsonify({
+        "service": "btc-paper-trading-bot", "symbol": SYMBOL, "status": "running", "trading_mode": TRADING_MODE,
+    })
 
 
 @app.route("/status")

@@ -3,10 +3,9 @@
 import logging
 import time
 
-from config import FETCH_INTERVAL_SEC
+from config import FETCH_INTERVAL_SEC, TRADING_MODE
 from improved.data_fetcher import fetch_klines
 from improved.strategy import generate_signal
-from improved.paper_trader import PaperTrader
 from improved.notifier import notify
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -14,8 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 def run_loop():
-    trader = PaperTrader()
-    logger.info("ペーパートレードを開始します。Ctrl+Cで停止できます。")
+    if TRADING_MODE == "demo":
+        from improved.demo_trader import DemoTrader
+        trader = DemoTrader()
+        logger.info("[DEMO] Binance Testnetに接続して取引します。Ctrl+Cで停止できます。")
+    else:
+        from improved.paper_trader import PaperTrader
+        trader = PaperTrader()
+        logger.info("ペーパートレードを開始します。Ctrl+Cで停止できます。")
     had_error = False
     while True:
         try:

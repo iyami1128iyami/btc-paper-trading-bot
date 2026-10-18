@@ -158,6 +158,36 @@ Key Valueインスタンス自体が再起動された場合はデータが失�
 これはアプリのコードをデプロイし直すのとは別物で、通常の開発中の再デプロイでは
 Key Value側は再起動されないため、今回の「デプロイのたびに消える」問題は解消されます。
 
+## デモトレード(Binance Testnet)
+
+`TRADING_MODE=demo`を設定すると、内部シミュレーション(ペーパートレード)の代わりに、
+**Binance Testnet(仮想資金、実際にAPIで注文を出す)に接続して取引します**。
+売買ロジック(移動平均クロス/RSI逆張り/ストップロス/テイクプロフィット/
+トレーリングストップ/最低利益チェック)はペーパートレードと同じものを使います。
+
+**設定方法**
+1. [https://testnet.binance.vision](https://testnet.binance.vision) でGitHubアカウントを使ってログイン
+2. 「Generate HMAC_SHA256 Key」でAPIキー・Secret Keyを発行
+3. 環境変数を設定:
+   - `TRADING_MODE=demo`
+   - `BINANCE_API_KEY=<発行されたAPIキー>`
+   - `BINANCE_API_SECRET=<発行されたSecret Key>`
+
+`BINANCE_BASE_URL`(デフォルト: `https://testnet.binance.vision`)を本番用のURLに変更すれば、
+将来的に同じコードで本番環境にも接続できます(Binanceは本番・テストネットでAPI形式がほぼ共通)。
+
+**仕組み**
+- 残高(USDT・BTCなど)は、都度Binance Testnet側に問い合わせて取得する(自前では保持しない)
+- 「いくらで買ったか(entry_price)」「保有中の最高値(highest_price)」は取引所に概念が無いため、
+  ペーパートレードと同様に状態ストア(Redis/ファイル)で管理する
+- 買い注文は`quoteOrderQty`(使う金額)で指定し、取引所側に数量計算を任せる
+- 売り注文は、取引所の最小注文単位(LOT_SIZE)に合わせて数量を丸めてから発注する
+- 残高が取引所の最小注文金額(MIN_NOTIONAL)に満たない場合は、発注せず見送る
+
+**注意**: `demo`モードは実際にBinance(テストネット)のAPIへ注文を送信します。仮想資金なので
+金銭的リスクはありませんが、`paper`モード(完全な内部シミュレーション)とは動作が異なる点
+(APIのレート制限、約定価格のズレ、注文拒否など)に留意してください。
+
 ## 設定
 
 `.env.example`を参考に、`.env`ファイルを作成して設定値をカスタマイズしてください。
@@ -182,6 +212,9 @@ Key Value側は再起動されないため、今回の「デプロイのたび�
 - `TRAILING_STOP_PCT`: 有効化後、最高値からこの%下落したら決済(デフォルト: 0.5)
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`: Telegram通知を使う場合に設定(任意、上記「通知」セクション参照)
 - `REDIS_URL`: 状態の永続化にRender Key Valueを使う場合に設定(上記「状態の永続化」セクション参照、本運用では推奨)
+- `TRADING_MODE`: `paper`(デフォルト、内部シミュレーション)または`demo`(Binance Testnetに実際に発注)
+- `BINANCE_API_KEY` / `BINANCE_API_SECRET`: `TRADING_MODE=demo`の場合に必須
+- `BINANCE_BASE_URL`: Binance APIのベースURL(デフォルト: Testnet。本番移行時に変更)
 
 ## 取引ペアの切り替え
 
@@ -222,9 +255,13 @@ app.py                         Flask Webサーバー(クラウドデプロイ用
 backtest.py                    バックテストCLI
 improved/
   ├── data_fetcher.py          CoinGecko APIを使用した価格取得・過去データ取得
-  ├── strategy.py               移動平均線クロス + RSI戦略
-  ├── paper_trader.py          ペーパートレード実行エンジン(本番用、ファイル永続化あり)
-  └── backtest_engine.py       バックテスト専用エンジン(インメモリ、ファイルに触れない)
+  ├── strategy.py              レジームスイッチング(移動平均クロス + RSI逆張り)戦略
+  ├── paper_trader.py          ペーパートレード実行エンジン(内部シミュレーション、Redis/ファイル永続化)
+  ├── binance_client.py        Binance(Testnet/本番)の認証付きAPIクライアント
+  ├── demo_trader.py           デモトレード実行エンジン(Binance Testnetに実際に発注)
+  ├── backtest_engine.py       バックテスト専用エンジン(インメモリ、ファイルに触れない)
+  ├── notifier.py              Telegram通知
+  └── leader_lock.py           複数プロセスでの二重取引防止(Redisベースのリーダーロック)
 ```
 
 ## 注意

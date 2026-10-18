@@ -98,6 +98,23 @@ if LONG_WINDOW < RSI_PERIOD:
         LONG_WINDOW, RSI_PERIOD,
     )
 
+# ========== 取引モード ==========
+# "paper": 内部シミュレーションのみ(今まで通り、実際の注文は出ない)
+# "demo": Binance Testnet(仮想資金、実際にAPI経由で注文を出す)に接続する
+TRADING_MODE = os.getenv("TRADING_MODE", "paper")
+if TRADING_MODE not in ("paper", "demo"):
+    raise RuntimeError(f"TRADING_MODE は 'paper' か 'demo' にしてください(現在の値: {TRADING_MODE!r})")
+
+# ========== Binance Testnet(TRADING_MODE=demo の場合のみ使用) ==========
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+BINANCE_BASE_URL = os.getenv("BINANCE_BASE_URL", "https://testnet.binance.vision")
+
+if TRADING_MODE == "demo" and not (BINANCE_API_KEY and BINANCE_API_SECRET):
+    raise RuntimeError(
+        "TRADING_MODE=demo には BINANCE_API_KEY と BINANCE_API_SECRET の両方が必要です"
+    )
+
 # ========== 永続化 ==========
 # 設定すると、state(残高・ポジション)をローカルファイルの代わりにRender Key Value(Redis)
 # に保存する。Renderは再デプロイのたびにディスクを初期化するため、これを設定しないと
