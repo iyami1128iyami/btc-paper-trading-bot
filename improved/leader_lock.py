@@ -14,14 +14,16 @@ import os
 import socket
 import uuid
 
-from config import REDIS_URL, SYMBOL
+from config import REDIS_URL, SYMBOL, TRADING_MODE
 from improved.notifier import notify
 
 logger = logging.getLogger(__name__)
 
 # 同一プロセス内の複数スレッドから呼ばれても同じIDになるよう、プロセス起動時に1回だけ生成する
 _WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-_LOCK_KEY = f"btc_trading_bot:trading_loop_leader:{SYMBOL}"
+# TRADING_MODEもキーに含める。ペーパートレード用とデモトレード用に別々のRenderサービスを
+# 同じRedisで動かした場合に、お互いが同じロックを奪い合って片方が永久に取引できなくなるのを防ぐ。
+_LOCK_KEY = f"btc_trading_bot:trading_loop_leader:{TRADING_MODE}:{SYMBOL}"
 
 _redis_client = None
 if REDIS_URL:

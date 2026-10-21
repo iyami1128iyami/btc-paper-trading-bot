@@ -41,14 +41,18 @@ def _signed_request(method: str, path: str, params: dict | None = None, retries:
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         raise BinanceAPIError("BINANCE_API_KEY / BINANCE_API_SECRET が設定されていません")
 
+    base_params = dict(params or {})
     for attempt in range(retries):
-        params = dict(params or {})
-        params["timestamp"] = int(time.time() * 1000)
-        params["recvWindow"] = 10000
-        params["signature"] = _sign(params)
+        # 毎回、呼び出し元から渡された元のパラメータから作り直す。
+        # (前回の試行で追加したtimestamp/signatureを引き継いでしまうと、2回目以降は
+        #  古いsignatureの値まで署名の計算対象に含まれてしまい、不正な署名になる)
+        request_params = dict(base_params)
+        request_params["timestamp"] = int(time.time() * 1000)
+        request_params["recvWindow"] = 10000
+        request_params["signature"] = _sign(request_params)
         url = f"{BINANCE_BASE_URL}{path}"
         try:
-            resp = _session.request(method, url, params=params, timeout=10)
+            resp = _session.request(method, url, params=request_params, timeout=10)
             if resp.status_code in (429, 418):
                 retry_after = int(resp.headers.get("Retry-After", "5") or "5")
                 logger.warning("Binance APIのレート制限に達しました。%s秒待機します", retry_after)
@@ -63,7 +67,11 @@ def _signed_request(method: str, path: str, params: dict | None = None, retries:
                 except ValueError:
                     detail = resp.text
                 raise BinanceAPIError(f"Binance APIエラー(HTTP {resp.status_code}): {detail}")
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError as exc:
+                # レスポンスがJSONとして解釈できない場合も、一時的な不具合の可能性があるのでリトライ対象にする
+                raise requests.exceptions.ConnectionError(f"レスポンスがJSONとして解釈できません: {exc}") from exc
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             if attempt >= retries - 1:
                 logger.error("Binance APIへの接続に失敗しました: %s", exc)
@@ -80,11 +88,15 @@ def _public_request(path: str, params: dict | None = None, retries: int = 3) -> 
         try:
             resp = requests.get(url, params=params, timeout=10)
             resp.raise_for_status()
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise requests.exceptions.RequestException(f"レスポンスがJSONとして解釈できません: {exc}") from exc
         except requests.exceptions.RequestException as exc:
             if attempt >= retries - 1:
                 raise BinanceAPIError(str(exc)) from exc
             time.sleep(2**attempt)
+    raise BinanceAPIError("リトライ上限に達しました")
 
 
 def get_symbol_filters(symbol: str = SYMBOL) -> dict:
