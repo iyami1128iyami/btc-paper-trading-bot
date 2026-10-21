@@ -115,6 +115,14 @@ if TRADING_MODE == "demo" and not (BINANCE_API_KEY and BINANCE_API_SECRET):
         "TRADING_MODE=demo には BINANCE_API_KEY と BINANCE_API_SECRET の両方が必要です"
     )
 
+# デモトレードで「自分の持ち金」とみなす仮想の資金(USDT)。
+# Binance Testnetの口座には多額のテスト用資金が自動付与されるため、それをそのまま
+# 使うと本番運用の金額感と懸け離れてしまう。実際の注文はAPIで本物を出しつつ、
+# 「いくら使うか」の計算だけはこの金額を基準にした自前の帳簿で行う。
+DEMO_CAPITAL_USDT = _get_float("DEMO_CAPITAL_USDT", "100.0")
+if TRADING_MODE == "demo" and DEMO_CAPITAL_USDT <= 0:
+    raise RuntimeError(f"DEMO_CAPITAL_USDT は正の数値にしてください(現在の値: {DEMO_CAPITAL_USDT})")
+
 # ========== 永続化 ==========
 # 設定すると、state(残高・ポジション)をローカルファイルの代わりにRender Key Value(Redis)
 # に保存する。Renderは再デプロイのたびにディスクを初期化するため、これを設定しないと
