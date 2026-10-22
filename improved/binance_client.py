@@ -10,9 +10,9 @@ BINANCE_BASE_URLを本番用に変更すれば、同じコードで本番環境�
 import hashlib
 import hmac
 import logging
-import math
 import time
 import urllib.parse
+from decimal import ROUND_DOWN, Decimal
 
 import requests
 
@@ -127,12 +127,19 @@ def get_symbol_filters(symbol: str = SYMBOL) -> dict:
 
 
 def round_quantity(quantity: float, step_size: float) -> float:
-    """注文数量を、取引所が許可する最小単位(step_size)の倍数に切り捨てる。"""
+    """
+    注文数量を、取引所が許可する最小単位(step_size)の倍数に切り捨てる。
+
+    floatのまま割り算して切り捨てると、0.00114 / 0.00001 が 113.99999999999999 に
+    なって1単位余分に切り下がる(実際に発生した不具合)。そのため、数値を文字列経由で
+    Decimalに変換し、10進数として厳密に計算する。
+    """
     if step_size <= 0 or quantity <= 0:
         return max(quantity, 0.0)
-    precision = max(0, int(round(-math.log10(step_size))))
-    adjusted = math.floor(quantity / step_size) * step_size
-    return round(adjusted, precision)
+    step = Decimal(str(step_size))
+    qty = Decimal(str(quantity))
+    adjusted = (qty / step).to_integral_value(rounding=ROUND_DOWN) * step
+    return float(adjusted)
 
 
 def get_balance(asset: str) -> float:
