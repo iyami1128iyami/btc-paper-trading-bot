@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify
 
-from config import FETCH_INTERVAL_SEC, SYMBOL, TRADING_MODE
+from config import FETCH_INTERVAL_SEC, RUN_EXCHANGE_DIAG, SYMBOL, TRADING_MODE
 from improved.data_fetcher import fetch_klines
 from improved.strategy import generate_signal
 from improved.notifier import notify
@@ -37,6 +37,13 @@ except Exception:
         level="error", blocking=True,
     )
     raise
+
+if RUN_EXCHANGE_DIAG:
+    # 口座開設前の確認用(通常は無効)。別スレッドで1回だけ実行し、取引ループの起動は遅らせない。
+    from improved.exchange_diag import run_diagnostics_in_background
+
+    logger.info("[DIAG] 取引所の公開APIへの到達確認を実行します")
+    run_diagnostics_in_background()
 
 latest_status = {"updated_at": None, "price": None, "signal": None, "action": None, "portfolio_value": None}
 status_lock = threading.Lock()

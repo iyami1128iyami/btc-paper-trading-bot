@@ -195,6 +195,21 @@ Key Value側は再起動されないため、今回の「デプロイのたび�
 金銭的リスクはありませんが、`paper`モード(完全な内部シミュレーション)とは動作が異なる点
 (APIのレート制限、約定価格のズレ、注文拒否など)に留意してください。
 
+## 取引所APIへの到達確認(診断)
+
+本番口座を作る前に、「このサーバー(Renderの海外リージョン)から、その取引所のAPIに届くか」を
+確認するための機能です。以前、米国リージョンからBinanceに451エラーでブロックされたため、
+国内取引所にも同様の制限がある可能性を事前に潰す目的で用意しています。
+
+**使い方**: 環境変数 `RUN_EXCHANGE_DIAG=1` を設定して起動すると、起動時に1回だけ、
+認証不要の公開APIにアクセスして結果をログとTelegramに出します(通常は未設定のままにする)。
+対象はCoinGecko(対照)、Binance(api.binance.com・参考)、bitFlyer、GMOコイン、bitbankです。
+
+- ✅ 到達OK / ❌ アクセス拒否の可能性(HTTP 403・451) / ❌ 接続できず / ⚠️ その他のHTTPエラー
+- 公開API(価格取得)に届いても、注文などの非公開APIにも届くとは限りません(第一段階の確認)
+- Binance Japan独自のAPIドメインは未確認のため、対象に含めていません
+- 確認が済んだら `RUN_EXCHANGE_DIAG` は削除してください
+
 ## 設定
 
 `.env.example`を参考に、`.env`ファイルを作成して設定値をカスタマイズしてください。
@@ -223,6 +238,7 @@ Key Value側は再起動されないため、今回の「デプロイのたび�
 - `BINANCE_API_KEY` / `BINANCE_API_SECRET`: `TRADING_MODE=demo`の場合に必須
 - `BINANCE_BASE_URL`: Binance APIのベースURL(デフォルト: Testnet。本番移行時に変更)
 - `DEMO_CAPITAL_USDT`: デモトレードで「自分の持ち金」とみなす仮想資金(デフォルト: 100)
+- `RUN_EXCHANGE_DIAG`: `1`で起動時に取引所APIへの到達確認を1回実行(上記「取引所APIへの到達確認」参照、通常は未設定)
 
 ## 取引ペアの切り替え
 
@@ -269,6 +285,7 @@ improved/
   ├── demo_trader.py           デモトレード実行エンジン(Binance Testnetに実際に発注)
   ├── backtest_engine.py       バックテスト専用エンジン(インメモリ、ファイルに触れない)
   ├── notifier.py              Telegram通知
+  ├── exchange_diag.py         取引所の公開APIへの到達確認(診断、RUN_EXCHANGE_DIAG=1のときのみ)
   └── leader_lock.py           複数プロセスでの二重取引防止(Redisベースのリーダーロック)
 ```
 

@@ -123,6 +123,11 @@ DEMO_CAPITAL_USDT = _get_float("DEMO_CAPITAL_USDT", "100.0")
 if TRADING_MODE == "demo" and DEMO_CAPITAL_USDT <= 0:
     raise RuntimeError(f"DEMO_CAPITAL_USDT は正の数値にしてください(現在の値: {DEMO_CAPITAL_USDT})")
 
+# ========== 診断 ==========
+# 1に設定して起動すると、起動時に1回だけ、国内取引所などの公開APIにこのサーバーから
+# 到達できるかを確認してログ・Telegramに出す(口座開設前の確認用。通常は未設定のままにする)。
+RUN_EXCHANGE_DIAG = os.getenv("RUN_EXCHANGE_DIAG") == "1"
+
 # ========== 永続化 ==========
 # 設定すると、state(残高・ポジション)をローカルファイルの代わりにRender Key Value(Redis)
 # に保存する。Renderは再デプロイのたびにディスクを初期化するため、これを設定しないと
