@@ -128,6 +128,12 @@ if TRADING_MODE == "demo" and DEMO_CAPITAL_USDT <= 0:
 # 到達できるかを確認してログ・Telegramに出す(口座開設前の確認用。通常は未設定のままにする)。
 RUN_EXCHANGE_DIAG = os.getenv("RUN_EXCHANGE_DIAG") == "1"
 
+# 1以上にすると、起動後その分数のあいだ、国内取引所(bitFlyer/GMOコイン/bitbank)のBTC/JPYの
+# 売買差(スプレッド)を測定し、結果をログ・Telegramに出す(口座開設前の比較用)。0なら無効。
+SPREAD_PROBE_MINUTES = _get_int("SPREAD_PROBE_MINUTES", "0")
+if not 0 <= SPREAD_PROBE_MINUTES <= 180:
+    raise RuntimeError(f"SPREAD_PROBE_MINUTES は0〜180の整数にしてください(現在の値: {SPREAD_PROBE_MINUTES})")
+
 # ========== 永続化 ==========
 # 設定すると、state(残高・ポジション)をローカルファイルの代わりにRender Key Value(Redis)
 # に保存する。Renderは再デプロイのたびにディスクを初期化するため、これを設定しないと
