@@ -74,6 +74,18 @@ _SOURCES = {
 }
 
 
+def _describe_error(exc: Exception) -> str:
+    """失敗の原因が分かる短い文字列にする(型名だけでなくHTTPステータスと応答の先頭も出す)。"""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = (response.text or "").strip().replace("\n", " ")[:80]
+        except Exception:
+            body = ""
+        return f"{type(exc).__name__} status={response.status_code} body={body!r}"
+    return f"{type(exc).__name__}: {str(exc)[:80]}"
+
+
 def _spread_pct(bid: float, ask: float) -> float:
     mid = (bid + ask) / 2
     return (ask - bid) / mid * 100
@@ -96,7 +108,7 @@ def collect_samples(rounds: int, interval_sec: float = _INTERVAL_SEC):
                 parts.append(f"{name}={spread:.4f}%")
             except Exception as exc:  # 1社の失敗で全体の測定を止めない
                 failures[name] += 1
-                parts.append(f"{name}=失敗({type(exc).__name__})")
+                parts.append(f"{name}=失敗({_describe_error(exc)})")
         logger.info("[SPREAD] %d/%d %s", i + 1, rounds, " ".join(parts))
         if i < rounds - 1:
             time.sleep(max(0.0, interval_sec - (time.monotonic() - started)))
