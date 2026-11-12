@@ -11,7 +11,10 @@
  4. 結果をログ([COMPARE])とTelegramに出す
 を行う(0なら何もしない。終わったら0に戻すこと)。
 
-BACKTEST_COMPARE_MODE で比較の種類を選ぶ(既定 "regime"):
+BACKTEST_COMPARE_MODE で比較の種類を選ぶ(既定 "range"):
+ - "range" : レンジ型の買いの条件を変えた7パターン(現行/止める/ADX<20のみ/RSI反転確認/上位足フィルター/
+           組み合わせ)を比べる。トレンド型の買いと、売りシグナルは現行のまま。パターンは事前に決めた
+           7つだけで、結果を見てから条件を足さない(過剰最適化を避けるため)。
  - "regime": 買いを「レンジ型(ADX<閾値のRSI逆張り)」と「トレンド型(移動平均クロス)」に分け、
            それぞれの成績・損切りの回数と、片方だけ止めた場合の成績を比べる。
  - "exit": 損切り幅と、含み損でも売りシグナルで決済するかどうか(案A)
@@ -449,6 +452,115 @@ def build_reports_regime(prices, signals, regimes, adx_values, header: str):
     return "\n".join(detail), "\n".join(short)
 
 
+# ---------------------------------------------------------------- レンジ型の買い条件の改良案
+
+STRICT_RANGE_ADX = 20.0     # 「境目を除く」ためのADX上限(閾値25の-5)
+TREND_SMA_HOURS = 72        # 上位足フィルター: 終値が過去72時間の平均以上のときだけ買う
+RSI_OVERSOLD_LEVEL = 30.0
+
+
+def compute_features(prices: list[float], window: int = WINDOW_BARS):
+    """各時点の(直近window本での)ADXとRSI。計算できない時点はNone。"""
+    adx_values: list = [None] * len(prices)
+    rsi_values: list = [None] * len(prices)
+    for i in range(window - 1, len(prices)):
+        chunk = prices[i - window + 1 : i + 1]
+        adx_values[i] = strategy.calculate_adx(chunk)
+        rsi_values[i] = strategy.calculate_rsi(chunk)
+        if i % 400 == 0:
+            time.sleep(0.01)
+    return adx_values, rsi_values
+
+
+def sma_series(prices: list[float], bars: int) -> list:
+    """直近bars本の単純移動平均(最初のbars-1本はNone)。"""
+    out: list = [None] * len(prices)
+    running = 0.0
+    for i, price in enumerate(prices):
+        running += price
+        if i >= bars:
+            running -= prices[i - bars]
+        if i >= bars - 1:
+            out[i] = running / bars
+    return out
+
+
+RANGE_VARIANT_LABELS = (
+    ("R0 現行", "current"),
+    ("R1 レンジ買いを止める", "off"),
+    ("R2 ADX<20のみ買う", "strict"),
+    ("R3 RSI反転確認", "reversal"),
+    ("R4 72h平均以上のみ買う", "sma"),
+    ("R5 反転確認+72h平均以上", "reversal_sma"),
+    ("R6 ADX<20+反転確認", "strict_reversal"),
+)
+
+
+def make_range_variant(kind: str, prices, signals, adx_values, rsi_values, sma_values) -> list[str]:
+    """レンジ相場と判定される時点の買い条件だけを差し替えたシグナルを返す。
+    トレンド相場(またはADX不明)の時点のシグナルと、売りシグナルは変えない。"""
+    if kind == "current":
+        return list(signals)
+    out = list(signals)
+    for i in range(len(prices)):
+        adx = adx_values[i]
+        if adx is None or adx >= config.ADX_THRESHOLD:
+            continue                      # トレンド相場(またはADX不明): そのまま
+        if signals[i] == "SELL":
+            continue                      # レンジ相場の売りシグナルはそのまま
+        rsi, prev_rsi = rsi_values[i], rsi_values[i - 1] if i > 0 else None
+        above_sma = sma_values[i] is not None and prices[i] >= sma_values[i]
+        reversal = (rsi is not None and prev_rsi is not None
+                    and prev_rsi <= RSI_OVERSOLD_LEVEL < rsi)
+        original_buy = signals[i] == "BUY"
+        if kind == "off":
+            buy = False
+        elif kind == "strict":
+            buy = original_buy and adx < STRICT_RANGE_ADX
+        elif kind == "reversal":
+            buy = reversal
+        elif kind == "sma":
+            buy = original_buy and above_sma
+        elif kind == "reversal_sma":
+            buy = reversal and above_sma
+        elif kind == "strict_reversal":
+            buy = reversal and adx < STRICT_RANGE_ADX
+        else:
+            raise ValueError(kind)
+        out[i] = "BUY" if buy else "HOLD"
+    return out
+
+
+def build_reports_range(prices, signals, header: str):
+    """(ログ用の詳細テキスト, Telegram用の短いテキスト) を返す。"""
+    adx_values, rsi_values = compute_features(prices)
+    sma_values = sma_series(prices, TREND_SMA_HOURS * 12)
+    mid = len(prices) // 2
+    halves = {"前": slice(0, mid), "後": slice(mid, len(prices))}
+    bh = {n: (prices[s][-1] / prices[s][0] - 1) * 100 for n, s in halves.items()}
+    detail = [header, f"買い持ち 前{bh['前']:+.1f}% 後{bh['後']:+.1f}%"]
+    short = [header, f"買い持ち 前{bh['前']:+.1f}% 後{bh['後']:+.1f}%",
+             "表記: 全体(取引回数・勝率) 前半 後半(往復0.10%) / 0.2%=往復0.20%の全体"]
+    variant_signals = [(label, make_range_variant(kind, prices, signals, adx_values, rsi_values, sma_values))
+                       for label, kind in RANGE_VARIANT_LABELS]
+    for sl in (5.0, 2.0):
+        v = Variant(f"SL{sl:g}", sl, False)
+        header_line = f"■SL{sl:g}"
+        detail.append(header_line)
+        short.append(header_line)
+        for label, sig in variant_signals:
+            res = simulate(prices, sig, v, 0.05)
+            res20 = simulate(prices, sig, v, 0.10)
+            res0 = simulate(prices, sig, v, 0.0)
+            half = {n: simulate(prices[s], sig[s], v, 0.05) for n, s in halves.items()}
+            line = (f"{label}: {_short(res)} 前{half['前'].return_pct:+.1f}% 後{half['後'].return_pct:+.1f}% "
+                    f"0.2%:{res20.return_pct:+.1f}%")
+            short.append(line)
+            detail.append(line + f" | 平均{res.avg_pnl_pct:+.2f}% 勝{res.avg_win_pct:+.2f}%/負{res.avg_loss_pct:+.2f}% "
+                          f"DD{res.max_dd_pct:.1f}% 手数料0:{res0.return_pct:+.1f}%")
+    return "\n".join(detail), "\n".join(short)
+
+
 def run_comparison(days: int):
     started = time.monotonic()
     notify(f"🧪 比較バックテストを開始します(直近{days}日・モード{config.BACKTEST_COMPARE_MODE})。結果は終了後に通知します。")
@@ -462,7 +574,12 @@ def run_comparison(days: int):
     if len(prices) < WINDOW_BARS + 300:
         raise RuntimeError(f"データが少なすぎます({len(prices)}本)")
     mode = config.BACKTEST_COMPARE_MODE
-    if mode == "regime":
+    if mode == "range":
+        signals = compute_signals(prices)
+        header = (f"BTC/JPY 5分足 {first:%m/%d}〜{last:%m/%d} UTC({len(prices):,}本, {source}, {describe_gaps(timestamps)}) "
+                  f"買い持ち 全体{(prices[-1] / prices[0] - 1) * 100:+.1f}%")
+        detail, short = build_reports_range(prices, signals, header)
+    elif mode == "regime":
         signals, regimes, adx_values = compute_signals_with_regime(prices)
         header = (f"BTC/JPY 5分足 {first:%m/%d}〜{last:%m/%d} UTC({len(prices):,}本, {source}, {describe_gaps(timestamps)}) "
                   f"買い持ち 全体{(prices[-1] / prices[0] - 1) * 100:+.1f}%")
