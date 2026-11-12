@@ -11,6 +11,14 @@
  4. 結果をログ([COMPARE])とTelegramに出す
 を行う(0なら何もしない。終わったら0に戻すこと)。
 
+BACKTEST_COMPARE_MODE で比較の種類を選ぶ(既定 "bc"):
+ - "exit": 損切り幅と、含み損でも売りシグナルで決済するかどうか(案A)
+ - "bc"  : 時間軸(5分/15分/1時間/4時間)と、下落中の買いを止めるフィルター(案BとC)。
+           5分足を k 本ごとに間引いて長い足を作り、同じ戦略(MA5/20・RSI14・ADX14)を当てる。
+           フィルター: 終値が過去24時間/72時間の単純移動平均より下なら、BUYシグナルを見送る。
+           注意: 決済の設定(最低利益0.3%・トレーリング1%/0.5%など)は5分足向けの値のまま、
+           長い足でも変えていない(長い足では不利になっている可能性がある)。
+
 ライブの取引ロジック(paper_trader / demo_trader / backtest_engine)には一切手を入れない。
 このモジュールは比較専用の簡易シミュレーターを持つ。
 
@@ -274,9 +282,91 @@ def build_reports(prices, signals, header: str):
     return "\n".join(detail), "\n".join(short)
 
 
+# ---------------------------------------------------------------- 案B・C: 時間軸と下落フィルター
+
+TIMEFRAMES = (("5分", 1), ("15分", 3), ("1時間", 12), ("4時間", 48))   # 5分足を何本ごとに間引くか
+TREND_FILTER_HOURS = (None, 24, 72)                                  # None=フィルターなし
+BC_STOP_LOSS_CHOICES = (5.0, 2.0)
+
+
+def resample(timestamps: list[int], prices: list[float], k: int):
+    """5分足をk本ごとに間引いて長い足にする(各バケットの最後の終値。最新の足を必ず含める)。"""
+    if k == 1:
+        return list(timestamps), list(prices)
+    idx = range(len(prices) - 1, -1, -k)
+    picked = sorted(idx)
+    return [timestamps[i] for i in picked], [prices[i] for i in picked]
+
+
+def apply_trend_filter(prices: list[float], signals: list[str], sma_bars: int) -> list[str]:
+    """終値が直近sma_bars本の単純移動平均より下の時点では、BUYを見送る(HOLDにする)。
+    平均が計算できない最初のsma_bars-1本もBUYは見送る。売りシグナルはそのまま。"""
+    out = list(signals)
+    running = 0.0
+    for i, price in enumerate(prices):
+        running += price
+        if i >= sma_bars:
+            running -= prices[i - sma_bars]
+        if signals[i] == "BUY":
+            if i < sma_bars - 1 or price < running / sma_bars:
+                out[i] = "HOLD"
+    return out
+
+
+def build_reports_bc(timestamps, base_prices, header: str):
+    """(ログ用の詳細テキスト, Telegram用の短いテキスト) を返す。"""
+    detail = [header]
+    short = [header,
+             "表記: 往復0.10%での 全体/前半/後半 の損益(取引回数)。末尾は往復0.20%の全体。",
+             "SLは損切り幅%、フィルターは終値が24h/72h平均より下ならBUY見送り。"]
+    for label, k in TIMEFRAMES:
+        ts_k, prices = resample(timestamps, base_prices, k)
+        if len(prices) < WINDOW_BARS + 150:
+            detail.append(f"=== {label}足: データ不足({len(prices)}本)で省略 ===")
+            short.append(f"[{label}足] データ不足で省略")
+            continue
+        raw_signals = compute_signals(prices)
+        mid = len(prices) // 2
+        halves = {"前": slice(0, mid), "後": slice(mid, len(prices))}
+        bh_half = {n: (prices[s][-1] / prices[s][0] - 1) * 100 for n, s in halves.items()}
+        bh_all = (prices[-1] / prices[0] - 1) * 100
+        head = (f"[{label}足 {len(prices):,}本 BUY{raw_signals.count('BUY')}/SELL{raw_signals.count('SELL')}] "
+                f"買い持ち 全{bh_all:+.1f}% 前{bh_half['前']:+.1f}% 後{bh_half['後']:+.1f}%")
+        detail.append(f"=== {head} ===")
+        short.append(head)
+        for hours in TREND_FILTER_HOURS:
+            if hours is None:
+                signals, flabel = raw_signals, "フィルターなし"
+            else:
+                sma_bars = max(2, round(hours * 12 / k))
+                signals, flabel = apply_trend_filter(prices, raw_signals, sma_bars), f"{hours}hフィルター({sma_bars}本)"
+            for sl in BC_STOP_LOSS_CHOICES:
+                v = Variant(f"SL{sl:g}", sl, False)
+                row = {}
+                for cost_side in COST_PER_SIDE_PCT:
+                    row[cost_side] = (
+                        simulate(prices, signals, v, cost_side),
+                        {n: simulate(prices[s], signals[s], v, cost_side) for n, s in halves.items()},
+                    )
+                all10, half10 = row[0.05]
+                all20, _ = row[0.10]
+                all0, _ = row[0.0]
+                detail.append(
+                    f"{label} SL{sl:g} {flabel}: コスト0 全体{all0.return_pct:+.1f}% | "
+                    f"0.10% 全体{_short(all10)} 平均{all10.avg_pnl_pct:+.2f}% DD{all10.max_dd_pct:.1f}% "
+                    f"前半{_short(half10['前'])} 後半{_short(half10['後'])} | 0.20% 全体{_short(all20)}"
+                )
+                tag = "なし" if hours is None else f"{hours}h"
+                short.append(
+                    f"SL{sl:g} {tag}: {all10.return_pct:+.1f}/{half10['前'].return_pct:+.1f}/{half10['後'].return_pct:+.1f}%"
+                    f"({all10.trades}回) 0.2%:{all20.return_pct:+.1f}%"
+                )
+    return "\n".join(detail), "\n".join(short)
+
+
 def run_comparison(days: int):
     started = time.monotonic()
-    notify(f"🧪 決済ルールの比較バックテストを開始します(直近{days}日・5分足)。結果は終了後に通知します。")
+    notify(f"🧪 比較バックテストを開始します(直近{days}日・モード{config.BACKTEST_COMPARE_MODE})。結果は終了後に通知します。")
     timestamps, prices, source, notes = fetch_5min_closes(days)
     first = datetime.fromtimestamp(timestamps[0] / 1000, timezone.utc)
     last = datetime.fromtimestamp(timestamps[-1] / 1000, timezone.utc)
@@ -286,16 +376,21 @@ def run_comparison(days: int):
 
     if len(prices) < WINDOW_BARS + 300:
         raise RuntimeError(f"データが少なすぎます({len(prices)}本)")
-    signals = compute_signals(prices)
-    buys = signals.count("BUY")
-    sells = signals.count("SELL")
-    logger.info("[COMPARE] シグナル数: BUY %d / SELL %d", buys, sells)
-
-    header = (
-        f"BTC/JPY 5分足 {first:%m/%d}〜{last:%m/%d} UTC({len(prices):,}本, {source}) "
-        f"{describe_gaps(timestamps)} / BUY{buys}・SELL{sells}"
-    )
-    detail, short = build_reports(prices, signals, header)
+    mode = config.BACKTEST_COMPARE_MODE
+    if mode == "bc":
+        header = (f"BTC/JPY 5分足を元に時間軸比較 {first:%m/%d}〜{last:%m/%d} UTC"
+                  f"({len(prices):,}本, {source}, {describe_gaps(timestamps)})")
+        detail, short = build_reports_bc(timestamps, prices, header)
+    else:
+        signals = compute_signals(prices)
+        buys = signals.count("BUY")
+        sells = signals.count("SELL")
+        logger.info("[COMPARE] シグナル数: BUY %d / SELL %d", buys, sells)
+        header = (
+            f"BTC/JPY 5分足 {first:%m/%d}〜{last:%m/%d} UTC({len(prices):,}本, {source}) "
+            f"{describe_gaps(timestamps)} / BUY{buys}・SELL{sells}"
+        )
+        detail, short = build_reports(prices, signals, header)
     for line in detail.splitlines():
         logger.info("[COMPARE] %s", line)
     if notes:
