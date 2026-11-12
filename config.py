@@ -140,6 +140,11 @@ BACKTEST_COMPARE_DAYS = _get_int("BACKTEST_COMPARE_DAYS", "0")
 if not 0 <= BACKTEST_COMPARE_DAYS <= 180:
     raise RuntimeError(f"BACKTEST_COMPARE_DAYS は0〜180の整数にしてください(現在の値: {BACKTEST_COMPARE_DAYS})")
 
+# 比較の種類: "bc"=時間軸(5分/15分/1時間/4時間)と下落中の買い停止の比較、"exit"=損切り幅などの決済ルールの比較
+BACKTEST_COMPARE_MODE = os.getenv("BACKTEST_COMPARE_MODE", "bc")
+if BACKTEST_COMPARE_MODE not in ("bc", "exit"):
+    raise RuntimeError(f"BACKTEST_COMPARE_MODE は bc か exit にしてください(現在の値: {BACKTEST_COMPARE_MODE})")
+
 # ========== 永続化 ==========
 # 設定すると、state(残高・ポジション)をローカルファイルの代わりにRender Key Value(Redis)
 # に保存する。Renderは再デプロイのたびにディスクを初期化するため、これを設定しないと
