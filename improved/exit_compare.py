@@ -11,7 +11,9 @@
  4. 結果をログ([COMPARE])とTelegramに出す
 を行う(0なら何もしない。終わったら0に戻すこと)。
 
-BACKTEST_COMPARE_MODE で比較の種類を選ぶ(既定 "bc"):
+BACKTEST_COMPARE_MODE で比較の種類を選ぶ(既定 "regime"):
+ - "regime": 買いを「レンジ型(ADX<閾値のRSI逆張り)」と「トレンド型(移動平均クロス)」に分け、
+           それぞれの成績・損切りの回数と、片方だけ止めた場合の成績を比べる。
  - "exit": 損切り幅と、含み損でも売りシグナルで決済するかどうか(案A)
  - "bc"  : 時間軸(5分/15分/1時間/4時間)と、下落中の買いを止めるフィルター(案BとC)。
            5分足を k 本ごとに間引いて長い足を作り、同じ戦略(MA5/20・RSI14・ADX14)を当てる。
@@ -182,7 +184,7 @@ class SimResult:
     open_position: bool
 
 
-def simulate(prices, signals, variant: Variant, cost_per_side_pct: float = 0.0) -> SimResult:
+def simulate(prices, signals, variant: Variant, cost_per_side_pct: float = 0.0, trade_log=None) -> SimResult:
     """
     決済ルールだけを変えたシミュレーション。ベースライン(損切り5%・loss_exit_on_signal=False・
     手数料0)は improved.backtest_engine.BacktestTrader と同じ結果になる(テストで確認)。
@@ -190,35 +192,41 @@ def simulate(prices, signals, variant: Variant, cost_per_side_pct: float = 0.0) 
     cost = cost_per_side_pct / 100
     ratio = config.TRADE_RATIO
     cash, qty = 1.0, 0.0
-    entry = highest = spent = None
+    entry = highest = spent = entry_i = None
     pnls: list[float] = []
     peak, max_dd = 1.0, 0.0
 
-    for price, signal in zip(prices, signals):
+    for i, (price, signal) in enumerate(zip(prices, signals)):
         if qty > 0:
             highest = max(highest, price)
             change = (price - entry) / entry * 100
             exit_now = False
-            if change >= TAKE_PROFIT_PCT or change <= -variant.stop_loss_pct:
-                exit_now = True
+            reason = ""
+            if change >= TAKE_PROFIT_PCT:
+                exit_now, reason = True, "TP"
+            elif change <= -variant.stop_loss_pct:
+                exit_now, reason = True, "SL"
             else:
                 peak_change = (highest - entry) / entry * 100
                 if peak_change >= config.TRAILING_STOP_ACTIVATION_PCT:
                     if (highest - price) / highest * 100 >= config.TRAILING_STOP_PCT:
-                        exit_now = True
+                        exit_now, reason = True, "TRAIL"
             if not exit_now and signal == "SELL":
                 if change >= config.MIN_PROFIT_PCT_TO_EXIT or (variant.loss_exit_on_signal and change < 0):
-                    exit_now = True
+                    exit_now, reason = True, "SIGNAL"
             if exit_now:
                 proceeds = qty * price * (1 - cost)
                 pnls.append((proceeds - spent) / spent * 100)
+                if trade_log is not None:
+                    trade_log.append((entry_i, pnls[-1], reason))
                 cash += proceeds
-                qty, entry, highest, spent = 0.0, None, None, None
+                qty, entry, highest, spent, entry_i = 0.0, None, None, None, None
         elif signal == "BUY":
             spent = cash * ratio
             qty = spent * (1 - cost) / price
             cash -= spent
             entry = highest = price
+            entry_i = i
 
         value = cash + qty * price
         peak = max(peak, value)
@@ -364,6 +372,83 @@ def build_reports_bc(timestamps, base_prices, header: str):
     return "\n".join(detail), "\n".join(short)
 
 
+# ---------------------------------------------------------------- レンジ型/トレンド型の買いの分析
+
+def compute_signals_with_regime(prices: list[float], window: int = WINDOW_BARS):
+    """compute_signals と同じシグナルに加え、BUYの時点の相場判定(range/trend)とADXを返す。"""
+    signals = compute_signals(prices, window)
+    regimes = [""] * len(prices)
+    adx_values = [None] * len(prices)
+    for i, signal in enumerate(signals):
+        if signal != "BUY":
+            continue
+        adx = strategy.calculate_adx(prices[i - window + 1 : i + 1])
+        adx_values[i] = adx
+        regimes[i] = "range" if (adx is not None and adx < config.ADX_THRESHOLD) else "trend"
+    return signals, regimes, adx_values
+
+
+def _drop_buys(signals: list[str], regimes: list[str], regime_to_drop: str) -> list[str]:
+    return ["HOLD" if s == "BUY" and regimes[i] == regime_to_drop else s for i, s in enumerate(signals)]
+
+
+def _regime_stats(trade_log, regimes):
+    """エントリー時の相場判定ごとの集計: {regime: (回数, 勝率%, 平均%, 合計%, 損切り回数, 損切りの合計%)}"""
+    out = {}
+    for regime in ("range", "trend"):
+        rows = [(pnl, reason) for entry_i, pnl, reason in trade_log if regimes[entry_i] == regime]
+        n = len(rows)
+        wins = sum(1 for pnl, _ in rows if pnl > 0)
+        sl = [pnl for pnl, reason in rows if reason == "SL"]
+        out[regime] = (
+            n,
+            wins / n * 100 if n else 0.0,
+            sum(p for p, _ in rows) / n if n else 0.0,
+            sum(p for p, _ in rows),
+            len(sl),
+            sum(sl),
+        )
+    return out
+
+
+def build_reports_regime(prices, signals, regimes, adx_values, header: str):
+    """(ログ用の詳細テキスト, Telegram用の短いテキスト) を返す。"""
+    mid = len(prices) // 2
+    halves = {"前": slice(0, mid), "後": slice(mid, len(prices))}
+    n_range = sum(1 for r in regimes if r == "range")
+    n_trend = sum(1 for r in regimes if r == "trend")
+    near = sum(1 for r, a in zip(regimes, adx_values) if r == "range" and a is not None and a >= config.ADX_THRESHOLD - 5)
+    sig_line = (f"BUYシグナルの内訳(毎回の判定): レンジ型{n_range}・トレンド型{n_trend} "
+                f"(レンジ型のうちADXが閾値-5以上の境目は{near})")
+    detail = [header, sig_line]
+    short = [header, sig_line]
+
+    cost_side = 0.05   # 往復0.10%
+    for sl in (5.0, 2.0):
+        v = Variant(f"SL{sl:g}", sl, False)
+        log: list = []
+        res = simulate(prices, signals, v, cost_side, trade_log=log)
+        stats = _regime_stats(log, regimes)
+        no_range = simulate(prices, _drop_buys(signals, regimes, "range"), v, cost_side)
+        no_trend = simulate(prices, _drop_buys(signals, regimes, "trend"), v, cost_side)
+        h_all = {n: simulate(prices[s], signals[s], v, cost_side) for n, s in halves.items()}
+        h_no_range = {n: simulate(prices[s], _drop_buys(signals, regimes, "range")[s], v, cost_side) for n, s in halves.items()}
+        h_no_trend = {n: simulate(prices[s], _drop_buys(signals, regimes, "trend")[s], v, cost_side) for n, s in halves.items()}
+        lines = [f"■SL{sl:g}・往復0.10%: 全体{_short(res)} 最大DD{res.max_dd_pct:.1f}%"]
+        for regime, label in (("range", "レンジ型"), ("trend", "トレンド型")):
+            n, win, avg, total, sl_n, sl_total = stats[regime]
+            lines.append(f"{label}: {n}回 勝率{win:.0f}% 平均{avg:+.2f}% 合計{total:+.1f}% / 損切り{sl_n}回(合計{sl_total:+.1f}%)")
+        lines.append(f"レンジ型を止めた場合: 全体{_short(no_range)} 前{_short(h_no_range['前'])} 後{_short(h_no_range['後'])}")
+        lines.append(f"トレンド型を止めた場合: 全体{_short(no_trend)} 前{_short(h_no_trend['前'])} 後{_short(h_no_trend['後'])}")
+        lines.append(f"(参考)止めない場合: 前{_short(h_all['前'])} 後{_short(h_all['後'])}")
+        detail += lines
+        short += lines
+    first_cost0 = simulate(prices, signals, Variant("SL5", 5.0, False), 0.0)
+    detail.append(f"(参考)手数料0・SL5: 全体{_short(first_cost0)}")
+    short.append(f"(参考)手数料0・SL5: 全体{_short(first_cost0)}")
+    return "\n".join(detail), "\n".join(short)
+
+
 def run_comparison(days: int):
     started = time.monotonic()
     notify(f"🧪 比較バックテストを開始します(直近{days}日・モード{config.BACKTEST_COMPARE_MODE})。結果は終了後に通知します。")
@@ -377,7 +462,12 @@ def run_comparison(days: int):
     if len(prices) < WINDOW_BARS + 300:
         raise RuntimeError(f"データが少なすぎます({len(prices)}本)")
     mode = config.BACKTEST_COMPARE_MODE
-    if mode == "bc":
+    if mode == "regime":
+        signals, regimes, adx_values = compute_signals_with_regime(prices)
+        header = (f"BTC/JPY 5分足 {first:%m/%d}〜{last:%m/%d} UTC({len(prices):,}本, {source}, {describe_gaps(timestamps)}) "
+                  f"買い持ち 全体{(prices[-1] / prices[0] - 1) * 100:+.1f}%")
+        detail, short = build_reports_regime(prices, signals, regimes, adx_values, header)
+    elif mode == "bc":
         header = (f"BTC/JPY 5分足を元に時間軸比較 {first:%m/%d}〜{last:%m/%d} UTC"
                   f"({len(prices):,}本, {source}, {describe_gaps(timestamps)})")
         detail, short = build_reports_bc(timestamps, prices, header)
