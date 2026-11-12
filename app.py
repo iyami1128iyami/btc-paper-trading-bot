@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify
 
-from config import FETCH_INTERVAL_SEC, RUN_EXCHANGE_DIAG, SPREAD_PROBE_MINUTES, SYMBOL, TRADING_MODE
+from config import (
+    BACKTEST_COMPARE_DAYS, FETCH_INTERVAL_SEC, RUN_EXCHANGE_DIAG, SPREAD_PROBE_MINUTES, SYMBOL, TRADING_MODE,
+)
 from improved.data_fetcher import fetch_klines
 from improved.strategy import generate_signal
 from improved.notifier import notify
@@ -51,6 +53,13 @@ if SPREAD_PROBE_MINUTES > 0:
 
     logger.info("[SPREAD] 国内取引所のBTC/JPY売買差を%d分間測定します", SPREAD_PROBE_MINUTES)
     run_spread_probe_in_background(SPREAD_PROBE_MINUTES)
+
+if BACKTEST_COMPARE_DAYS > 0:
+    # 戦略見直し用の比較バックテスト(通常は無効)。別スレッドで1回だけ実行し、取引ループの起動は遅らせない。
+    from improved.exit_compare import run_comparison_in_background
+
+    logger.info("[COMPARE] 決済ルールの比較バックテストを直近%d日ぶんで実行します", BACKTEST_COMPARE_DAYS)
+    run_comparison_in_background(BACKTEST_COMPARE_DAYS)
 
 latest_status = {"updated_at": None, "price": None, "signal": None, "action": None, "portfolio_value": None}
 status_lock = threading.Lock()

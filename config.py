@@ -134,6 +134,12 @@ SPREAD_PROBE_MINUTES = _get_int("SPREAD_PROBE_MINUTES", "0")
 if not 0 <= SPREAD_PROBE_MINUTES <= 180:
     raise RuntimeError(f"SPREAD_PROBE_MINUTES は0〜180の整数にしてください(現在の値: {SPREAD_PROBE_MINUTES})")
 
+# 1以上にすると、起動後その日数ぶんの5分足(国内取引所のBTC/JPY)で、損切り幅などの決済ルールを
+# 比べるバックテストを1回実行し、結果をログ・Telegramに出す(戦略の見直し用)。0なら無効。
+BACKTEST_COMPARE_DAYS = _get_int("BACKTEST_COMPARE_DAYS", "0")
+if not 0 <= BACKTEST_COMPARE_DAYS <= 180:
+    raise RuntimeError(f"BACKTEST_COMPARE_DAYS は0〜180の整数にしてください(現在の値: {BACKTEST_COMPARE_DAYS})")
+
 # ========== 永続化 ==========
 # 設定すると、state(残高・ポジション)をローカルファイルの代わりにRender Key Value(Redis)
 # に保存する。Renderは再デプロイのたびにディスクを初期化するため、これを設定しないと
