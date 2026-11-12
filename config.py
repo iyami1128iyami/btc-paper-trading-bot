@@ -141,10 +141,11 @@ if not 0 <= BACKTEST_COMPARE_DAYS <= 180:
     raise RuntimeError(f"BACKTEST_COMPARE_DAYS は0〜180の整数にしてください(現在の値: {BACKTEST_COMPARE_DAYS})")
 
 # 比較の種類: "bc"=時間軸(5分/15分/1時間/4時間)と下落中の買い停止の比較、"exit"=損切り幅などの決済ルールの比較、
-# "regime"=買いをレンジ型(RSI逆張り)とトレンド型(移動平均クロス)に分けた成績の比較
-BACKTEST_COMPARE_MODE = os.getenv("BACKTEST_COMPARE_MODE", "regime")
-if BACKTEST_COMPARE_MODE not in ("bc", "exit", "regime"):
-    raise RuntimeError(f"BACKTEST_COMPARE_MODE は bc / exit / regime のいずれかにしてください(現在の値: {BACKTEST_COMPARE_MODE})")
+# "regime"=買いをレンジ型(RSI逆張り)とトレンド型(移動平均クロス)に分けた成績の比較、
+# "range"=レンジ型の買いの条件(反転確認・ADXの境目除外・上位足フィルター)を変えた場合の比較
+BACKTEST_COMPARE_MODE = os.getenv("BACKTEST_COMPARE_MODE", "range")
+if BACKTEST_COMPARE_MODE not in ("bc", "exit", "regime", "range"):
+    raise RuntimeError(f"BACKTEST_COMPARE_MODE は bc / exit / regime / range のいずれかにしてください(現在の値: {BACKTEST_COMPARE_MODE})")
 
 # ========== 永続化 ==========
 # 設定すると、state(残高・ポジション)をローカルファイルの代わりにRender Key Value(Redis)
