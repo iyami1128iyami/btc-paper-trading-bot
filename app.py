@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from flask import Flask, jsonify
 
 from config import (
-    BACKTEST_COMPARE_DAYS, FETCH_INTERVAL_SEC, RUN_EXCHANGE_DIAG, SPREAD_PROBE_MINUTES, SYMBOL, TRADING_MODE,
+    BACKTEST_COMPARE_DAYS, FETCH_INTERVAL_SEC, MOMENTUM_BACKTEST_YEARS, RUN_EXCHANGE_DIAG, SPREAD_PROBE_MINUTES, SYMBOL, TRADING_MODE,
 )
 from improved.data_fetcher import fetch_klines
 from improved.strategy import generate_signal
@@ -60,6 +60,13 @@ if BACKTEST_COMPARE_DAYS > 0:
 
     logger.info("[COMPARE] 決済ルールの比較バックテストを直近%d日ぶんで実行します", BACKTEST_COMPARE_DAYS)
     run_comparison_in_background(BACKTEST_COMPARE_DAYS)
+
+if MOMENTUM_BACKTEST_YEARS > 0:
+    # 日足モメンタム検証(通常は無効)。別スレッドで1回だけ実行する。
+    from improved.momentum_compare import run_momentum_in_background
+
+    logger.info("[MOMENTUM] 日足モメンタム検証を直近%d年ぶんで実行します", MOMENTUM_BACKTEST_YEARS)
+    run_momentum_in_background(MOMENTUM_BACKTEST_YEARS)
 
 latest_status = {"updated_at": None, "price": None, "signal": None, "action": None, "portfolio_value": None}
 status_lock = threading.Lock()

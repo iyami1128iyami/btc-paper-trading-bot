@@ -140,6 +140,12 @@ BACKTEST_COMPARE_DAYS = _get_int("BACKTEST_COMPARE_DAYS", "0")
 if not 0 <= BACKTEST_COMPARE_DAYS <= 180:
     raise RuntimeError(f"BACKTEST_COMPARE_DAYS は0〜180の整数にしてください(現在の値: {BACKTEST_COMPARE_DAYS})")
 
+# 1以上にすると、起動後その年数ぶんの日足(bitbankのJPY銘柄)で、「直近で上がった銘柄を買う」戦略の
+# 検証を1回実行し、結果をログ・Telegramに出す。0なら無効。
+MOMENTUM_BACKTEST_YEARS = _get_int("MOMENTUM_BACKTEST_YEARS", "0")
+if not 0 <= MOMENTUM_BACKTEST_YEARS <= 8:
+    raise RuntimeError(f"MOMENTUM_BACKTEST_YEARS は0〜8の整数にしてください(現在の値: {MOMENTUM_BACKTEST_YEARS})")
+
 # 比較の種類: "bc"=時間軸(5分/15分/1時間/4時間)と下落中の買い停止の比較、"exit"=損切り幅などの決済ルールの比較、
 # "regime"=買いをレンジ型(RSI逆張り)とトレンド型(移動平均クロス)に分けた成績の比較、
 # "range"=レンジ型の買いの条件(反転確認・ADXの境目除外・上位足フィルター)を変えた場合の比較
