@@ -68,7 +68,12 @@ class NoData(Exception):
 
 def fetch_daily(pair: str, year: int) -> list[tuple[int, float, float]]:
     """(日番号, 終値, 売買代金[円])のリスト。日番号=UTC換算のエポック日。"""
-    payload = _get_json(f"https://public.bitbank.cc/{pair}/candlestick/1day/{year}")
+    resp = requests.get(f"https://public.bitbank.cc/{pair}/candlestick/1day/{year}", timeout=15)
+    if resp.status_code == 404:
+        # 上場前の年などは、bitbankが404(success=0, code=10000)を返す。データ無しとして扱う。
+        raise NoData(resp.text[:80])
+    resp.raise_for_status()
+    payload = resp.json()
     if payload.get("success") != 1:
         raise NoData(str(payload.get("data")))
     candles = payload["data"]["candlestick"]
@@ -89,7 +94,10 @@ def fetch_all(years: int, sleep_sec: float = 0.3):
     year_list = list(range(this_year - years + 1, this_year + 1))
     data: dict[str, dict[int, tuple[float, float]]] = {}
     failures, empty, total = [], 0, 0
+    expected_total = len(pairs) * len(year_list)
     for pair in pairs:
+        if len(failures) > expected_total * MAX_FAILURE_RATE:
+            break   # 失敗が多すぎる: 以降の取得を打ち切る(下で例外にする)
         for year in year_list:
             total += 1
             last_exc = None
@@ -112,8 +120,8 @@ def fetch_all(years: int, sleep_sec: float = 0.3):
                 data.setdefault(pair, {})[day] = (close, volume)
             time.sleep(sleep_sec)
     notes = [f"{len(pairs)}銘柄×{len(year_list)}年={total}回取得、データ無し{empty}回、失敗{len(failures)}回"]
-    if len(failures) > total * MAX_FAILURE_RATE:
-        raise RuntimeError(f"取得失敗が多すぎます({len(failures)}/{total}回): " + " / ".join(failures[:3]))
+    if len(failures) > expected_total * MAX_FAILURE_RATE:
+        raise RuntimeError(f"取得失敗が多すぎます({len(failures)}/{expected_total}回): " + " / ".join(failures[:3]))
     notes.extend(failures[:5])
     if not data:
         raise RuntimeError("日足が1本も取得できませんでした")
