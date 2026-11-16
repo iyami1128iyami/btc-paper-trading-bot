@@ -146,6 +146,18 @@ MOMENTUM_BACKTEST_YEARS = _get_int("MOMENTUM_BACKTEST_YEARS", "0")
 if not 0 <= MOMENTUM_BACKTEST_YEARS <= 8:
     raise RuntimeError(f"MOMENTUM_BACKTEST_YEARS は0〜8の整数にしてください(現在の値: {MOMENTUM_BACKTEST_YEARS})")
 
+# 1以上にすると、起動後その日数ぶんの5分足と、8年ぶんの日足(bitbankのBTC/JPY)で、
+# 「レンジは持たない・上昇はロング・下降はショート」の検証を1回実行し、結果をログ・Telegramに出す。0なら無効。
+LONGSHORT_BACKTEST_DAYS = _get_int("LONGSHORT_BACKTEST_DAYS", "0")
+if not 0 <= LONGSHORT_BACKTEST_DAYS <= 180:
+    raise RuntimeError(f"LONGSHORT_BACKTEST_DAYS は0〜180の整数にしてください(現在の値: {LONGSHORT_BACKTEST_DAYS})")
+
+# 日足モメンタム検証の種類: "diag"=負けた原因の診断(銘柄別の寄与・分布・損切りの効果・データの異常)、
+# "compare"=戦略のパターン比較
+MOMENTUM_MODE = os.getenv("MOMENTUM_MODE", "diag")
+if MOMENTUM_MODE not in ("diag", "compare"):
+    raise RuntimeError(f"MOMENTUM_MODE は diag か compare にしてください(現在の値: {MOMENTUM_MODE})")
+
 # 比較の種類: "bc"=時間軸(5分/15分/1時間/4時間)と下落中の買い停止の比較、"exit"=損切り幅などの決済ルールの比較、
 # "regime"=買いをレンジ型(RSI逆張り)とトレンド型(移動平均クロス)に分けた成績の比較、
 # "range"=レンジ型の買いの条件(反転確認・ADXの境目除外・上位足フィルター)を変えた場合の比較
