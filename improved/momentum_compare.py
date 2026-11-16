@@ -11,6 +11,13 @@
 試すパターンは事前に決めた固定の組み合わせ(L=7/14日、H=7/14日、K=1/3、上位/下位)だけで、
 結果を見てから足さない(過剰最適化を避けるため)。
 
+MOMENTUM_MODE="diag"(既定)のときは、パターン比較ではなく、負けた原因の診断を出す:
+ - 銘柄ごとの損益への寄与(どの銘柄が足を引っ張ったか)
+ - 買った翌期間の損益の分布(全銘柄との比較、大きな負けの頻度)
+ - 損切り(10%・20%)を付けた場合の成績
+ - 売買代金の少ない銘柄での成績
+ - 銘柄ごとの買い持ち成績と、日足の異常値の有無
+
 近似・限界(結果を読むときの注意):
 - 「いまbitbankに上場している銘柄」だけが対象。上場廃止になった銘柄は含まれない(生存者バイアス。
   成績が実際より良く出る方向に偏る)。
@@ -134,6 +141,7 @@ class Market:
     """日付をそろえた価格表。closes[pair][i]=その日の終値(欠測は3日まで前日の値で埋め、それ以上はNone)。"""
 
     def __init__(self, data: dict[str, dict[int, tuple[float, float]]]):
+        self.raw = data
         self.start_day = min(min(d) for d in data.values())
         self.end_day = max(max(d) for d in data.values())
         n = self.end_day - self.start_day + 1
@@ -185,10 +193,12 @@ class Market:
 # ---------------------------------------------------------------- シミュレーション
 
 def simulate(market: Market, lookback: int, hold: int, top_k, reverse: bool, cost_side_pct: float,
-             start_idx: int, end_idx: int) -> dict:
+             start_idx: int, end_idx: int, stop_pct=None, record=None) -> dict:
     """
     start_idx〜end_idx(日の添字)のあいだ、hold日ごとに、直近lookback日の上昇率で並べた上位(reverse=Trueなら下位)
     top_k銘柄を等金額で買い、hold日保有する。top_k=Noneなら、買える全銘柄の等金額。
+    stop_pct: 保有中に終値が買値からこの%以上下がったら、その日の終値で売る(以後は次の入れ替えまで現金)。
+    record: リストを渡すと、買った銘柄ごとの記録(dict)を追加する(診断用)。
     """
     cost = cost_side_pct / 100
     equity, peak, max_dd = 1.0, 1.0, 0.0
@@ -209,15 +219,36 @@ def simulate(market: Market, lookback: int, hold: int, top_k, reverse: bool, cos
         turnover = sum(abs(weights.get(p, 0.0) - prev_weights.get(p, 0.0)) for p in set(weights) | set(prev_weights))
         equity *= 1 - cost * turnover
         gross = 0.0
+        stopped_weight = 0.0
+        stopped: set[str] = set()
         for p, w in weights.items():
+            entry_price = market.closes[p][i]
             exit_price = market.price_at_or_before(p, i + hold)
-            gross += w * (exit_price / market.closes[p][i] - 1)
+            was_stopped = False
+            if stop_pct is not None:
+                limit = entry_price * (1 - stop_pct / 100)
+                for d in range(i + 1, min(i + hold, market.n_days - 1) + 1):
+                    c = market.closes[p][d]
+                    if c is not None and c <= limit:
+                        exit_price, was_stopped = c, True
+                        break
+            ret = exit_price / entry_price - 1
+            gross += w * ret
+            if was_stopped:
+                stopped_weight += w
+                stopped.add(p)
+            if record is not None:
+                record.append({
+                    "pair": p, "idx": i, "weight": w, "ret": ret, "stopped": was_stopped,
+                    "vol_median": statistics.median(market.volumes[p][max(0, i - LIQUIDITY_WINDOW_DAYS + 1) : i + 1]),
+                })
         equity *= 1 + gross
-        period_returns.append(gross - cost * turnover)
+        equity *= 1 - cost * stopped_weight        # 損切りで売るコスト
+        period_returns.append(gross - cost * turnover - cost * stopped_weight)
         picks.append(chosen)
         peak = max(peak, equity)
         max_dd = max(max_dd, (peak - equity) / peak)
-        prev_weights = weights
+        prev_weights = {p: w for p, w in weights.items() if p not in stopped}
         i += hold
     equity *= 1 - cost * sum(prev_weights.values())   # 最後に全部売るコスト
     wins = sum(1 for r in period_returns if r > 0)
@@ -282,6 +313,116 @@ def build_reports(market: Market, header: str):
     return "\n".join(detail), "\n".join(short)
 
 
+# ---------------------------------------------------------------- 負けた原因の診断
+
+def percentile(values: list[float], q: float) -> float:
+    ordered = sorted(values)
+    pos = (len(ordered) - 1) * q
+    lo, hi = int(pos), min(int(pos) + 1, len(ordered) - 1)
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+
+
+def dist_text(rets: list[float]) -> str:
+    """買った翌期間の損益(%)の分布。"""
+    if not rets:
+        return "データなし"
+    pct = [r * 100 for r in rets]
+    n = len(pct)
+    return (f"n={n} 平均{sum(pct) / n:+.2f}% 中央値{percentile(pct, 0.5):+.2f}% "
+            f"下位5%点{percentile(pct, 0.05):+.1f}% 上位5%点{percentile(pct, 0.95):+.1f}% "
+            f"-20%以下{sum(1 for x in pct if x <= -20) / n * 100:.0f}% +20%以上{sum(1 for x in pct if x >= 20) / n * 100:.0f}%")
+
+
+def attribution(records: list[dict], top_n: int = 3):
+    """銘柄ごとの損益への寄与(重み×損益の合計、%)と、買った期間数。悪い順・良い順に上位top_n。"""
+    contrib: dict[str, list] = {}
+    for r in records:
+        c = contrib.setdefault(r["pair"], [0.0, 0])
+        c[0] += r["weight"] * r["ret"] * 100
+        c[1] += 1
+    ranked = sorted(contrib.items(), key=lambda kv: kv[1][0])
+    fmt = lambda kv: f"{kv[0].replace('_jpy', '')}{kv[1][0]:+.0f}%({kv[1][1]}期間)"
+    return " ".join(fmt(kv) for kv in ranked[:top_n]), " ".join(fmt(kv) for kv in reversed(ranked[-top_n:]))
+
+
+def daily_move_sanity(market: Market, top_n: int = 5) -> str:
+    moves = []
+    for pair, rows in market.raw.items():
+        days = sorted(rows)
+        for a, b in zip(days, days[1:]):
+            if b == a + 1:
+                move = rows[b][0] / rows[a][0] - 1
+                moves.append((abs(move), pair, b, move))
+    moves.sort(reverse=True)
+    n50 = sum(1 for m in moves if m[0] > 0.5)
+    n100 = sum(1 for m in moves if m[0] > 1.0)
+    worst = " ".join(
+        f"{p.replace('_jpy', '')} {datetime.fromtimestamp(d * DAY_MS / 1000, timezone.utc):%y/%m/%d} {mv:+.0%}"
+        for _, p, d, mv in moves[:top_n])
+    return f"1日で±50%超の動き{n50}回、±100%超{n100}回(全{len(moves):,}日中)。大きい順: {worst}"
+
+
+def coin_hold_stats(market: Market) -> str:
+    rets = {}
+    for pair in market.pairs:
+        s = market.first_idx[pair] + MIN_HISTORY_DAYS
+        closes = market.closes[pair]
+        e = max((j for j in range(market.n_days) if closes[j] is not None), default=None)
+        if e is None or s >= e or closes[s] is None:
+            continue
+        rets[pair] = closes[e] / closes[s] - 1
+    vals = [v * 100 for v in rets.values()]
+    n = len(vals)
+    if n == 0:
+        return "銘柄ごとの買い持ち: 集計できる銘柄がありません(履歴が短すぎます)"
+    btc = f"BTC{rets['btc_jpy'] * 100:+.0f}%" if "btc_jpy" in rets else "BTCなし"
+    return (f"銘柄ごとの買い持ち(上場60日後から現在まで、{n}銘柄): 中央値{percentile(vals, 0.5):+.0f}% "
+            f"マイナスの銘柄{sum(1 for v in vals if v < 0) / n * 100:.0f}% -50%以下{sum(1 for v in vals if v <= -50) / n * 100:.0f}% {btc}")
+
+
+def build_diagnostics(market: Market, header: str):
+    benchmark = "btc_jpy" if "btc_jpy" in market.closes else market.pairs[0]
+    start_idx = max(market.first_idx[benchmark] + MIN_HISTORY_DAYS, max(LOOKBACKS))
+    end_idx = market.n_days - 1
+    cost = COST_PER_SIDE_PCT[0]
+    strategies = [("全銘柄の等金額", 7, 7, None), ("7日上位3", 7, 7, 3), ("14日上位3", 14, 7, 3), ("7日上位1", 7, 7, 1)]
+    lines = [header, f"手数料は片道{cost}%、保有7日、期間 {market.n_days}日中の検証区間 {end_idx - start_idx}日", ""]
+
+    lines.append("【1】銘柄ごとの寄与(悪い銘柄 / 良い銘柄)")
+    records_by_name: dict[str, list] = {}
+    for name, lb, hold, k in strategies:
+        rec: list = []
+        res = simulate(market, lb, hold, k, False, cost, start_idx, end_idx, record=rec)
+        records_by_name[name] = rec
+        worst, best = attribution(rec)
+        lines.append(f"{name}(全体{res['total_pct']:+.0f}%): 悪い→{worst} / 良い→{best}")
+
+    lines += ["", "【2】買った翌期間の損益の分布(銘柄ごと)"]
+    universe = [r["ret"] for r in records_by_name["全銘柄の等金額"]]
+    lines.append(f"全銘柄: {dist_text(universe)}")
+    for name in ("7日上位3", "14日上位3", "7日上位1"):
+        lines.append(f"{name}: {dist_text([r['ret'] for r in records_by_name[name]])}")
+
+    lines += ["", "【3】売買代金の少なさ(直近30日の中央値 1億円未満 / 以上)で見た成績"]
+    for name in ("7日上位3", "7日上位1"):
+        recs = records_by_name[name]
+        low = [r["ret"] for r in recs if r["vol_median"] < 100_000_000]
+        high = [r["ret"] for r in recs if r["vol_median"] >= 100_000_000]
+        lines.append(f"{name}: 少ない側 {dist_text(low)}")
+        lines.append(f"{' ' * len(name)}  多い側 {dist_text(high)}")
+
+    lines += ["", "【4】損切りを付けた場合(保有中に終値が買値から-10%/-20%で売る。保有7日、全体の損益・最大DD)"]
+    for name, lb, hold, k in strategies[:3]:
+        parts = []
+        for stop in (None, 10, 20):
+            res = simulate(market, lb, hold, k, False, cost, start_idx, end_idx, stop_pct=stop)
+            parts.append(f"{'なし' if stop is None else f'-{stop}%'}: {res['total_pct']:+.0f}%(DD{res['max_dd_pct']:.0f}%)")
+        lines.append(f"{name}: " + " / ".join(parts))
+
+    lines += ["", "【5】データ・母集団の確認", daily_move_sanity(market), coin_hold_stats(market)]
+    return "\n".join(lines)
+
+
 def run_momentum(years: int):
     started = time.monotonic()
     notify(f"🧪 日足モメンタム検証を開始します(直近{years}年・bitbankのJPY銘柄)。結果は終了後に通知します。")
@@ -292,7 +433,10 @@ def run_momentum(years: int):
     logger.info("[MOMENTUM] %s", header)
     for note in notes:
         logger.info("[MOMENTUM] %s", note)
-    detail, short = build_reports(market, header)
+    if config.MOMENTUM_MODE == "diag":
+        detail = short = build_diagnostics(market, header)
+    else:
+        detail, short = build_reports(market, header)
     for line in detail.splitlines():
         logger.info("[MOMENTUM] %s", line)
     short += f"\n(所要{time.monotonic() - started:.0f}秒。上場廃止銘柄を含まないため、成績は実際より良く出る方向に偏ります)"
