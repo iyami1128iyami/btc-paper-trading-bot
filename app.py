@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from flask import Flask, jsonify
 
 from config import (
-    BACKTEST_COMPARE_DAYS, FETCH_INTERVAL_SEC, LONGSHORT_BACKTEST_DAYS, MOMENTUM_BACKTEST_YEARS, RUN_EXCHANGE_DIAG, SPREAD_PROBE_MINUTES, SYMBOL, TRADING_MODE,
+    BACKTEST_COMPARE_DAYS, FETCH_INTERVAL_SEC, LONGSHORT_BACKTEST_DAYS, MOMENTUM_BACKTEST_YEARS,
+    NAKANE_BACKTEST_DAYS, RUN_EXCHANGE_DIAG, SPREAD_PROBE_MINUTES, SYMBOL, TRADING_MODE,
 )
 from improved.data_fetcher import fetch_klines
 from improved.strategy import generate_signal
@@ -74,6 +75,20 @@ if LONGSHORT_BACKTEST_DAYS > 0:
 
     logger.info("[LONGSHORT] ロング/ショート検証を5分足%d日ぶんで実行します", LONGSHORT_BACKTEST_DAYS)
     run_longshort_in_background(LONGSHORT_BACKTEST_DAYS)
+
+if NAKANE_BACKTEST_DAYS > 0:
+    # 仲値トレードの検証(通常は無効)。別スレッドで1回だけ実行する。
+    from improved.nakane_compare import run_nakane_in_background
+
+    logger.info("[NAKANE] 仲値トレードの検証を直近%d日ぶんで実行します", NAKANE_BACKTEST_DAYS)
+    run_nakane_in_background(NAKANE_BACKTEST_DAYS)
+
+if NAKANE_BACKTEST_DAYS > 0:
+    # 仲値トレードの検証(通常は無効)。別スレッドで1回だけ実行する。
+    from improved.nakane_compare import run_nakane_in_background
+
+    logger.info("[NAKANE] 仲値トレードの検証を直近%d日ぶんで実行します", NAKANE_BACKTEST_DAYS)
+    run_nakane_in_background(NAKANE_BACKTEST_DAYS)
 
 latest_status = {"updated_at": None, "price": None, "signal": None, "action": None, "portfolio_value": None}
 status_lock = threading.Lock()
