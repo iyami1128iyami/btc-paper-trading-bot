@@ -164,6 +164,11 @@ NAKANE_BACKTEST_DAYS = _get_int("NAKANE_BACKTEST_DAYS", "0")
 if not 0 <= NAKANE_BACKTEST_DAYS <= 1100:
     raise RuntimeError(f"NAKANE_BACKTEST_DAYS は0〜1100の整数にしてください(現在の値: {NAKANE_BACKTEST_DAYS})")
 
+# 仲値トレード検証の種類: "robust"=ゴトー日のドテン売りの頑健性の深掘り、"full"=最初の全体の検証
+NAKANE_MODE = os.getenv("NAKANE_MODE", "robust")
+if NAKANE_MODE not in ("robust", "full"):
+    raise RuntimeError(f"NAKANE_MODE は robust か full にしてください(現在の値: {NAKANE_MODE})")
+
 # 日足モメンタム検証の種類: "diag"=負けた原因の診断(銘柄別の寄与・分布・損切りの効果・データの異常)、
 # "compare"=戦略のパターン比較
 MOMENTUM_MODE = os.getenv("MOMENTUM_MODE", "diag")
