@@ -18,6 +18,16 @@
  押し目フィルター: エントリー時の中値が、当日6:00(日本時間)の中値より低いときだけ買う
      (「前日終値より安い」の私の解釈。6:00は、NYクローズ直後の価格)。
 
+NAKANE_MODE="robust"(既定)のときは、上の[C](ゴトー日のドテン売り)だけを、頑健性の観点で深掘りする:
+ 事前に決めた「実装を検討する条件」(下の5項目)を、結果を見る前に固定してある。
+   1. 基準(売9:55→10:30、ゴトー日)の平均が、ブートストラップの95%信頼区間の下限で、0を上回る
+   2. ゴトー日が「ランダムな日」より特別か(並べ替え検定)のp値が0.05未満
+   3. ゴトー日を古い順に前半・後半に分けて、両方の平均がプラス
+   4. 約定が片道0.5pips悪化しても、平均がプラス
+   5. 売り開始(9:50/9:54/9:55/9:56)×決済(10:00/10:15/10:30)の12通りのうち、8通り以上で平均がプラス
+ さらに、別の時刻の同じ長さの窓(プラセボ)、ゴトー日の種類別、曜日別、半期別も出す。
+ 取得したデータは、Redis(REDIS_URL)があれば、縮小して保存し、次回は不足分だけ取得する(失敗しても無視)。
+
 コスト: 買いはASKの始値、売りはBIDの始値で約定するので、スプレッドは自動で入る。API手数料は、
  1通貨あたり0.002円/約定(2025年3月版の説明書。最新は未確認)=0.2pips×2(往復0.4pips)を引いた値と、
  引かない値の両方を出す。スワップはなし(8時〜11時に、ロールオーバーをまたがない)。
@@ -28,15 +38,20 @@
 - 組み合わせが多いので、見かけ上の「有意」は、偶然で出やすい(多重比較)。t値が2を超えても、そのまま信じない。
 """
 
+import base64
+import json
 import logging
+import random
 import statistics
 import threading
 import time
+import zlib
 from datetime import date, datetime, timedelta, timezone
 
 import requests
 
-from improved.jp_calendar import gotobi_days, is_business_day
+import config
+from improved.jp_calendar import GOTOBI_NOMINAL_DAYS, gotobi_days, is_bank_holiday, is_business_day
 from improved.notifier import notify
 from improved.spread_probe import _describe_error
 
@@ -85,7 +100,7 @@ def fetch_day(day: date, price_type: str) -> dict[int, tuple]:
     return out
 
 
-def fetch_all(days: int, sleep_sec: float = FETCH_SLEEP_SEC):
+def fetch_all(days: int, sleep_sec: float = FETCH_SLEEP_SEC, have=None, reduce: bool = False):
     """{日: {"BID": {...}, "ASK": {...}}} と、メモ。銀行営業日だけを取得する。"""
     today = datetime.now(JST).date()
     end = today - timedelta(days=1)
@@ -94,7 +109,12 @@ def fetch_all(days: int, sleep_sec: float = FETCH_SLEEP_SEC):
     targets = [d for d in targets if is_business_day(d)]
     data: dict[date, dict[str, dict]] = {}
     failures, empty = [], 0
+    reused = 0
     for i, day in enumerate(targets):
+        if have and day in have:
+            data[day] = have[day]
+            reused += 1
+            continue
         if len(failures) > max(5, len(targets) * MAX_FAILURE_RATE):
             raise RuntimeError(f"取得失敗が多すぎます({len(failures)}/{len(targets)}日): " + " / ".join(failures[:3]))
         got = {}
@@ -114,12 +134,12 @@ def fetch_all(days: int, sleep_sec: float = FETCH_SLEEP_SEC):
             time.sleep(sleep_sec)
         else:
             if got["BID"] and got["ASK"]:
-                data[day] = got
+                data[day] = reduce_day(got) if reduce else got
             else:
                 empty += 1
         if (i + 1) % 100 == 0:
             logger.info("[NAKANE] 取得 %d/%d日", i + 1, len(targets))
-    notes = [f"対象の営業日{len(targets)}日、取得{len(data)}日、データ無し{empty}日、失敗{len(failures)}件"] + failures[:5]
+    notes = [f"対象の営業日{len(targets)}日、取得{len(data)}日(うち保存済み{reused}日)、データ無し{empty}日、失敗{len(failures)}件"] + failures[:5]
     if not data:
         raise RuntimeError("1分足が1日分も取得できませんでした: " + " / ".join(failures[:3]))
     return data, notes, start, end
@@ -306,14 +326,223 @@ def build_reports(data, header: str):
     return "\n".join(detail), "\n".join(short)
 
 
+# ---------------------------------------------------------------- データの縮小と保存(Redis)
+
+REDUCED_MINUTES = frozenset({6 * 60} | set(range(9 * 60, 11 * 60 + 6)))   # 6:00 と 9:00〜11:05
+CACHE_KEY = "nakane:cache:v1"
+CACHE_MAX_BYTES = 4_000_000
+CACHE_TTL_SEC = 90 * 86400
+
+
+def reduce_day(day_data: dict) -> dict:
+    return {side: {m: v for m, v in bars.items() if m in REDUCED_MINUTES} for side, bars in day_data.items()}
+
+
+def _redis_client():
+    if not config.REDIS_URL:
+        return None
+    import redis
+
+    return redis.from_url(config.REDIS_URL, decode_responses=False, socket_timeout=20, socket_connect_timeout=10)
+
+
+def encode_cache(data: dict) -> bytes:
+    payload = {d.isoformat(): {side: {str(m): list(v) for m, v in bars.items()} for side, bars in sides.items()}
+               for d, sides in data.items()}
+    return zlib.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"), 6)
+
+
+def decode_cache(blob: bytes) -> dict:
+    raw = json.loads(zlib.decompress(blob).decode("utf-8"))
+    return {date.fromisoformat(d): {side: {int(m): tuple(v) for m, v in bars.items()} for side, bars in sides.items()}
+            for d, sides in raw.items()}
+
+
+def load_cache() -> dict:
+    try:
+        client = _redis_client()
+        blob = client.get(CACHE_KEY) if client else None
+        if not blob:
+            return {}
+        data = decode_cache(blob)
+        logger.info("[NAKANE] 保存済みのデータを読み込みました(%d日)", len(data))
+        return data
+    except Exception as exc:
+        logger.warning("[NAKANE] 保存済みデータを読めませんでした(無視して取得します): %s", _describe_error(exc))
+        return {}
+
+
+def save_cache(data: dict) -> None:
+    try:
+        client = _redis_client()
+        if client is None:
+            return
+        blob = encode_cache(data)
+        if len(blob) > CACHE_MAX_BYTES:
+            logger.warning("[NAKANE] 保存データが大きすぎるため保存しません(%d bytes)", len(blob))
+            return
+        client.set(CACHE_KEY, blob, ex=CACHE_TTL_SEC)
+        logger.info("[NAKANE] データを保存しました(%d日、%d bytes)", len(data), len(blob))
+    except Exception as exc:
+        logger.warning("[NAKANE] データを保存できませんでした(無視します): %s", _describe_error(exc))
+
+
+# ---------------------------------------------------------------- 頑健性の検証([C]の深掘り)
+
+ROBUST_ENTRIES = (M(9, 50), M(9, 54), M(9, 55), M(9, 56))
+ROBUST_EXITS = (M(10, 0), M(10, 15), M(10, 30))
+BASE_ENTRY, BASE_EXIT = M(9, 55), M(10, 30)
+PLACEBO_WINDOWS = ((M(9, 0), M(9, 35)), (M(9, 30), M(10, 5)), (M(10, 5), M(10, 40)), (M(10, 30), M(11, 5)))
+SLIPPAGES = (0.0, 0.5, 1.0)
+BOOTSTRAP_ROUNDS = 5000
+PERMUTATION_ROUNDS = 5000
+DAY_TYPE_BINS = (("5・10日", {5, 10}), ("15・20日", {15, 20}), ("25・30日", {25, 30}))
+WEEKDAY_NAMES = "月火水木金"
+
+
+def short_series(data, days, entry_min: int, exit_min: int, stop=None, slip_pips: float = 0.0) -> dict:
+    """{日: 手数料(API)とスリッページ後の損益pips} 約定できない日は含めない。"""
+    out = {}
+    for day in days:
+        res = simulate_short(data[day], entry_min, exit_min, stop)
+        if res is not None:
+            out[day] = res[1] - 2 * slip_pips
+    return out
+
+
+def bootstrap_ci(values: list[float], rounds: int = BOOTSTRAP_ROUNDS, seed: int = 12345) -> tuple[float, float]:
+    rng = random.Random(seed)
+    n = len(values)
+    means = sorted(sum(rng.choice(values) for _ in range(n)) / n for _ in range(rounds))
+    return means[int(rounds * 0.025)], means[int(rounds * 0.975)]
+
+
+def permutation_p(group_values: list[float], all_values: list[float], rounds: int = PERMUTATION_ROUNDS, seed: int = 54321) -> float:
+    """グループの平均が、全営業日からランダムに同じ数を選んだ平均以上になる確率(片側)。"""
+    rng = random.Random(seed)
+    n, target = len(group_values), sum(group_values) / len(group_values)
+    hits = sum(1 for _ in range(rounds) if sum(rng.sample(all_values, n)) / n >= target)
+    return (hits + 1) / (rounds + 1)
+
+
+def nominal_day(day: date) -> int | None:
+    """ゴトー日(前倒しを含む)が、どの5・10・15・20・25・30日に当たるか。"""
+    for nominal in GOTOBI_NOMINAL_DAYS:
+        try:
+            d = date(day.year, day.month, nominal)
+        except ValueError:
+            continue
+        while is_bank_holiday(d):
+            d -= timedelta(days=1)
+        if d == day:
+            return nominal
+    return None
+
+
+def _mean_t(values: list[float]) -> str:
+    st = stats(values)
+    return f"{st['mean']:+.1f}(t{st['t']:+.1f},n{st['n']})" if st["n"] else "n0"
+
+
+def build_robust_reports(data, header: str):
+    days = sorted(data)
+    gotobi = gotobi_days(days[0], days[-1])
+    g_days = [d for d in days if d in gotobi]
+    kinds = {d: classify(d, gotobi) for d in days}
+    detail = [header, f"営業日の内訳: ゴトー日{len(g_days)}・金曜{sum(1 for v in kinds.values() if v == 'F')}・"
+                      f"その他{sum(1 for v in kinds.values() if v == 'N')}"]
+
+    base_all = short_series(data, days, BASE_ENTRY, BASE_EXIT)
+    base_g = {d: v for d, v in base_all.items() if d in gotobi}
+    g_vals = [base_g[d] for d in sorted(base_g)]
+    st = stats(g_vals)
+    lo, hi = bootstrap_ci(g_vals)
+    p_perm = permutation_p(g_vals, list(base_all.values()), PERMUTATION_ROUNDS)
+    half = len(g_vals) // 2
+    first, second = g_vals[:half], g_vals[half:]
+    f_vals = [v for d, v in base_all.items() if kinds[d] == "F"]
+    n_vals = [v for d, v in base_all.items() if kinds[d] == "N"]
+
+    lines = [f"■基準 売9:55→10:30 ゴトー日(手数料後): 平均{st['mean']:+.2f}pips 勝率{st['win']:.0f}% t{st['t']:+.1f} n{st['n']}",
+             f"  95%信頼区間 [{lo:+.2f}, {hi:+.2f}] / 並べ替え検定p={p_perm:.3f}(全営業日からランダムに{st['n']}日選んだ平均と比較)",
+             f"  前半 {_mean_t(first)} / 後半 {_mean_t(second)}  金曜(参考) {_mean_t(f_vals)} / その他 {_mean_t(n_vals)}"]
+
+    by_half_year: dict[tuple[int, int], list[float]] = {}
+    for d in sorted(base_g):
+        by_half_year.setdefault((d.year, 1 if d.month <= 6 else 2), []).append(base_g[d])
+    lines.append("■半期別(基準・ゴトー日): " + " ".join(f"{y}H{h}:{_mean_t(v)}" for (y, h), v in sorted(by_half_year.items())))
+
+    lines.append("■感度(ゴトー日、手数料後の平均pips) 縦=売り開始、横=決済")
+    positives = 0
+    for entry in ROBUST_ENTRIES:
+        cells = []
+        for exit_min in ROBUST_EXITS:
+            series = short_series(data, g_days, entry, exit_min)
+            st_c = stats(list(series.values()))
+            positives += st_c["mean"] > 0
+            cells.append(f"{hm(exit_min)}:{_mean_t(list(series.values()))}")
+        lines.append(f"  {hm(entry)}売り: " + " ".join(cells))
+
+    lines.append("■約定が悪化した場合(基準、片道あたりの追加スリッページ)")
+    slip_means = {}
+    parts = []
+    for slip in SLIPPAGES:
+        series = short_series(data, g_days, BASE_ENTRY, BASE_EXIT, slip_pips=slip)
+        slip_means[slip] = stats(list(series.values()))["mean"]
+        parts.append(f"{slip:g}pips:{slip_means[slip]:+.2f}")
+    lines.append("  " + " / ".join(parts))
+    stop_series = short_series(data, g_days, BASE_ENTRY, BASE_EXIT, stop=30)
+    lines.append(f"  損切り-30pips付き: {_mean_t(list(stop_series.values()))}")
+
+    lines.append("■ゴトー日の種類別(基準)")
+    type_parts = []
+    for label, nominals in DAY_TYPE_BINS:
+        vals = [base_g[d] for d in sorted(base_g) if nominal_day(d) in nominals]
+        type_parts.append(f"{label}:{_mean_t(vals)}")
+    lines.append("  " + " ".join(type_parts))
+    wd_parts = []
+    for wd in range(5):
+        vals = [base_g[d] for d in sorted(base_g) if d.weekday() == wd]
+        wd_parts.append(f"{WEEKDAY_NAMES[wd]}:{_mean_t(vals)}")
+    lines.append("■曜日別(基準・ゴトー日) " + " ".join(wd_parts))
+
+    lines.append("■プラセボ(同じ売り、ゴトー日、別の時刻の35分窓。効果が9:55特有かの確認)")
+    placebo_parts = []
+    for start_min, end_min in PLACEBO_WINDOWS:
+        series = short_series(data, g_days, start_min, end_min)
+        placebo_parts.append(f"{hm(start_min)}→{hm(end_min)}:{_mean_t(list(series.values()))}")
+    lines.append("  " + " ".join(placebo_parts))
+
+    checks = [
+        ("95%信頼区間の下限が0超", lo > 0),
+        ("並べ替え検定p<0.05", p_perm < 0.05),
+        ("前半・後半とも平均がプラス", bool(first) and bool(second) and stats(first)["mean"] > 0 and stats(second)["mean"] > 0),
+        ("片道0.5pips悪化でも平均がプラス", slip_means[0.5] > 0),
+        (f"感度12通りのうち8通り以上がプラス({positives}/12)", positives >= 8),
+    ]
+    passed = sum(1 for _, ok in checks if ok)
+    lines.append(f"■事前に決めた条件の達成: {passed}/5")
+    lines += [f"  {'○' if ok else '×'} {name}" for name, ok in checks]
+    lines.append("※多数の組み合わせを見た後の結果なので、達成しても偶然の可能性は残る。3年分・円安局面に偏る。")
+    detail += lines
+    return "\n".join(detail), "\n".join([header, detail[1]] + lines)
+
+
 def run_nakane(days: int):
     started = time.monotonic()
-    notify(f"🧪 仲値トレードの検証を開始します(直近{days}日・USD/JPY 1分足)。データ取得に約25〜40分かかります。")
-    data, notes, start, end = fetch_all(days)
+    mode = config.NAKANE_MODE
+    notify(f"🧪 仲値トレードの検証を開始します(直近{days}日・USD/JPY 1分足・モード{mode})。"
+           f"データ取得に最大約35分かかります(保存済みの分は省略)。")
+    if mode == "robust":
+        have = load_cache()
+        data, notes, start, end = fetch_all(days, have=have, reduce=True)
+        save_cache(data)
+    else:
+        data, notes, start, end = fetch_all(days)
     header = f"USD/JPY 1分足(GMOコインFX) {start}〜{end} 取得{len(data)}日"
     for note in notes:
         logger.info("[NAKANE] %s", note)
-    detail, short = build_reports(data, header)
+    detail, short = (build_robust_reports if mode == "robust" else build_reports)(data, header)
     for line in detail.splitlines():
         logger.info("[NAKANE] %s", line)
     if len(notes) > 1:
