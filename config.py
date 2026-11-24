@@ -169,6 +169,13 @@ NAKANE_MODE = os.getenv("NAKANE_MODE", "robust")
 if NAKANE_MODE not in ("robust", "full"):
     raise RuntimeError(f"NAKANE_MODE は robust か full にしてください(現在の値: {NAKANE_MODE})")
 
+# 1以上にすると、起動後その日数ぶんのUSD/JPY 1分足(GMOコインFXの公開API)を5分足にまとめて、
+# ブレイクアウト戦略(東京ボックス・オープニングレンジ・前日高安)の検証を1回実行し、結果をログ・Telegramに出す
+# (データ取得に約35分)。0なら無効。
+BREAKOUT_BACKTEST_DAYS = _get_int("BREAKOUT_BACKTEST_DAYS", "0")
+if not 0 <= BREAKOUT_BACKTEST_DAYS <= 1100:
+    raise RuntimeError(f"BREAKOUT_BACKTEST_DAYS は0〜1100の整数にしてください(現在の値: {BREAKOUT_BACKTEST_DAYS})")
+
 # 日足モメンタム検証の種類: "diag"=負けた原因の診断(銘柄別の寄与・分布・損切りの効果・データの異常)、
 # "compare"=戦略のパターン比較
 MOMENTUM_MODE = os.getenv("MOMENTUM_MODE", "diag")
