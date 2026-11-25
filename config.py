@@ -152,12 +152,6 @@ LONGSHORT_BACKTEST_DAYS = _get_int("LONGSHORT_BACKTEST_DAYS", "0")
 if not 0 <= LONGSHORT_BACKTEST_DAYS <= 180:
     raise RuntimeError(f"LONGSHORT_BACKTEST_DAYS は0〜180の整数にしてください(現在の値: {LONGSHORT_BACKTEST_DAYS})")
 
-# 1以上にすると、起動後その日数ぶんのUSD/JPY 1分足(GMOコイン外国為替FXの公開API)で、
-# 仲値トレードの検証を1回実行し、結果をログ・Telegramに出す(最大1200。1000日で約30分かかる)。0なら無効。
-NAKANE_BACKTEST_DAYS = _get_int("NAKANE_BACKTEST_DAYS", "0")
-if not 0 <= NAKANE_BACKTEST_DAYS <= 1200:
-    raise RuntimeError(f"NAKANE_BACKTEST_DAYS は0〜1200の整数にしてください(現在の値: {NAKANE_BACKTEST_DAYS})")
-
 # 1以上にすると、起動後その日数ぶんのUSD/JPY 1分足(GMOコインFXの公開API)で、仲値トレードの検証を1回実行し、
 # 結果をログ・Telegramに出す(データ取得に約25〜40分)。0なら無効。
 NAKANE_BACKTEST_DAYS = _get_int("NAKANE_BACKTEST_DAYS", "0")
@@ -175,6 +169,12 @@ if NAKANE_MODE not in ("robust", "full"):
 BREAKOUT_BACKTEST_DAYS = _get_int("BREAKOUT_BACKTEST_DAYS", "0")
 if not 0 <= BREAKOUT_BACKTEST_DAYS <= 1100:
     raise RuntimeError(f"BREAKOUT_BACKTEST_DAYS は0〜1100の整数にしてください(現在の値: {BREAKOUT_BACKTEST_DAYS})")
+
+# 1以上にすると、起動後、2023年10月27日から遡るその年数ぶんのUSD/JPYティック(Dukascopyの公開データ)で、
+# 仲値後のドテン売りの再現性の検証を1回実行し、結果をログ・Telegramに出す。0なら無効。
+NAKANE_LONG_YEARS = _get_int("NAKANE_LONG_YEARS", "0")
+if not 0 <= NAKANE_LONG_YEARS <= 12:
+    raise RuntimeError(f"NAKANE_LONG_YEARS は0〜12の整数にしてください(現在の値: {NAKANE_LONG_YEARS})")
 
 # 日足モメンタム検証の種類: "diag"=負けた原因の診断(銘柄別の寄与・分布・損切りの効果・データの異常)、
 # "compare"=戦略のパターン比較

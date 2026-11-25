@@ -10,7 +10,7 @@ from flask import Flask, jsonify
 
 from config import (
     BACKTEST_COMPARE_DAYS, BREAKOUT_BACKTEST_DAYS, FETCH_INTERVAL_SEC, LONGSHORT_BACKTEST_DAYS, MOMENTUM_BACKTEST_YEARS,
-    NAKANE_BACKTEST_DAYS, RUN_EXCHANGE_DIAG, SPREAD_PROBE_MINUTES, SYMBOL, TRADING_MODE,
+    NAKANE_BACKTEST_DAYS, NAKANE_LONG_YEARS, RUN_EXCHANGE_DIAG, SPREAD_PROBE_MINUTES, SYMBOL, TRADING_MODE,
 )
 from improved.data_fetcher import fetch_klines
 from improved.strategy import generate_signal
@@ -83,19 +83,19 @@ if NAKANE_BACKTEST_DAYS > 0:
     logger.info("[NAKANE] 仲値トレードの検証を直近%d日ぶんで実行します", NAKANE_BACKTEST_DAYS)
     run_nakane_in_background(NAKANE_BACKTEST_DAYS)
 
-if NAKANE_BACKTEST_DAYS > 0:
-    # 仲値トレードの検証(通常は無効)。別スレッドで1回だけ実行する。
-    from improved.nakane_compare import run_nakane_in_background
-
-    logger.info("[NAKANE] 仲値トレードの検証を直近%d日ぶんで実行します", NAKANE_BACKTEST_DAYS)
-    run_nakane_in_background(NAKANE_BACKTEST_DAYS)
-
 if BREAKOUT_BACKTEST_DAYS > 0:
     # USD/JPYブレイクアウトの検証(通常は無効)。別スレッドで1回だけ実行する。
     from improved.breakout_compare import run_breakout_in_background
 
     logger.info("[BREAKOUT] ブレイクアウトの検証を直近%d日ぶんで実行します", BREAKOUT_BACKTEST_DAYS)
     run_breakout_in_background(BREAKOUT_BACKTEST_DAYS)
+
+if NAKANE_LONG_YEARS > 0:
+    # 仲値後のドテン売りの長期検証(通常は無効)。別スレッドで1回だけ実行する。
+    from improved.nakane_long import run_nakane_long_in_background
+
+    logger.info("[NAKANE-LONG] 仲値の長期検証を%d年ぶんで実行します", NAKANE_LONG_YEARS)
+    run_nakane_long_in_background(NAKANE_LONG_YEARS)
 
 latest_status = {"updated_at": None, "price": None, "signal": None, "action": None, "portfolio_value": None}
 status_lock = threading.Lock()
