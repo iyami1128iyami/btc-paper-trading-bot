@@ -1,7 +1,7 @@
 """日本の銀行営業日と、ゴトー日(5・10・15・20・25・30日。休業日なら前営業日)の判定。
 
 祝日は、法律の規則(固定日・ハッピーマンデー・春分/秋分・振替休日・国民の休日)から計算する。
-春分・秋分の近似式は1980〜2099年で有効。銀行の休業日は、日曜・祝日・12/31〜1/3とする。
+2007〜2026年に対応(2019年の特別の休日、2020・2021年のオリンピックに伴う移動を含む)。春分・秋分の近似式は1980〜2099年で有効。銀行の休業日は、日曜・祝日・12/31〜1/3とする。
 """
 
 from datetime import date, timedelta
@@ -30,20 +30,35 @@ def japanese_holidays(year: int) -> frozenset:
         return _cache[year]
     base = {
         date(year, 1, 1),
-        _nth_monday(year, 1, 2),                                  # 成人の日
+        _nth_monday(year, 1, 2) if year >= 2000 else date(year, 1, 15),   # 成人の日
         date(year, 2, 11),                                        # 建国記念の日
-        date(year, 2, 23),                                        # 天皇誕生日(2020年〜)
         date(year, 3, _spring_equinox_day(year)),                 # 春分の日
-        date(year, 4, 29),                                        # 昭和の日
-        date(year, 5, 3), date(year, 5, 4), date(year, 5, 5),     # 憲法記念日・みどりの日・こどもの日
-        _nth_monday(year, 7, 3),                                  # 海の日
-        date(year, 8, 11),                                        # 山の日
-        _nth_monday(year, 9, 3),                                  # 敬老の日
+        date(year, 4, 29),                                        # 昭和の日(2007年〜。それ以前はみどりの日)
+        date(year, 5, 3), date(year, 5, 5),                       # 憲法記念日・こどもの日
+        _nth_monday(year, 9, 3),                                  # 敬老の日(2003年〜)
         date(year, 9, _autumn_equinox_day(year)),                 # 秋分の日
-        _nth_monday(year, 10, 2),                                 # スポーツの日
         date(year, 11, 3),                                        # 文化の日
         date(year, 11, 23),                                       # 勤労感謝の日
     }
+    if year >= 2007:
+        base.add(date(year, 5, 4))                                # みどりの日(2007年〜。それ以前は国民の休日)
+    if year >= 2020:
+        base.add(date(year, 2, 23))                               # 天皇誕生日(2020年〜)
+    elif 1989 <= year <= 2018:
+        base.add(date(year, 12, 23))                              # 天皇誕生日(1989〜2018年)
+    # 海の日・山の日・体育の日(スポーツの日): 2020・2021年は、オリンピックに合わせて移動した
+    if year == 2020:
+        base |= {date(2020, 7, 23), date(2020, 7, 24), date(2020, 8, 10)}
+    elif year == 2021:
+        base |= {date(2021, 7, 22), date(2021, 7, 23), date(2021, 8, 8)}
+    else:
+        base.add(_nth_monday(year, 7, 3))                         # 海の日
+        if year >= 2016:
+            base.add(date(year, 8, 11))                           # 山の日(2016年〜)
+        if year <= 2019 or year >= 2022:
+            base.add(_nth_monday(year, 10, 2))                    # 体育の日(〜2019年)・スポーツの日(2022年〜)
+    if year == 2019:                                              # 改元に伴う特別の休日
+        base |= {date(2019, 4, 30), date(2019, 5, 1), date(2019, 10, 22)}
     holidays = set(base)
     for h in sorted(base):                                        # 振替休日: 日曜の祝日は、次の祝日でない日
         if h.weekday() == 6:
