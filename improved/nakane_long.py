@@ -24,21 +24,26 @@
    5. 9:54→9:57の中値の動きが、ゴトー日で下落(平均<0、t≦-2)
  (GMOコイン期間の結果: 基準+2.5pips、9:54→9:57は-2.1pips)
 
+取得の方針: 1本ずつ(待ち0.6秒)取得し、接続エラーは待ってから再試行する。20日連続で失敗したら、そこで止めて、
+ 取れた分(120日以上)で分析する。取得できた日は、Redisに保存し、次回の実行で再開できる。
+
 近似・限界: DukascopyのレートはGMOコインとは別の会社(ECN)のレート。固定コストは、GMOの実測値の仮定。
  ティックから1分の「始値」(その分の最初のティック。なければ直前の値)を作る近似。日本の祝日はコードで計算(2007〜2026年に対応)。
 """
 
+import json
 import logging
 import lzma
 import statistics
 import struct
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+import zlib
 from datetime import date, timedelta
 
 import requests
 
+import config
 from improved.jp_calendar import gotobi_days, is_business_day
 from improved.nakane_compare import PIP, bootstrap_ci, classify, permutation_p, stats
 from improved.notifier import notify
@@ -54,9 +59,15 @@ M = lambda h, m: h * 60 + m
 MINUTES = range(M(9, 50), M(10, 40) + 1)
 FIXED_COST_PIPS = 0.8
 BASE_ENTRY, BASE_EXIT = M(9, 55), M(10, 30)
-WORKERS = 3
-REQUEST_SLEEP_SEC = 0.1
-MAX_FAILURE_RATE = 0.10
+REQUEST_SLEEP_SEC = 0.6                 # 1ファイルごとの待ち。Dukascopyは、速すぎると接続を切る(2026-11の実測)
+RETRY_BACKOFF_SEC = (2, 5, 10, 20)      # 接続エラー・5xxの再試行までの待ち(最大4回)
+MAX_CONSECUTIVE_FAILURES = 20           # これだけ連続で失敗したら、ブロックされたとみなして取得を止める
+MAX_FAILURE_RATE = 0.25
+MIN_DAYS_FOR_PARTIAL = 120              # 途中で止まっても、これだけ取れていれば、そこまでで分析する
+REQUIRED_MINUTES = (M(9, 54), M(9, 55), M(9, 57), M(10, 30))
+CACHE_KEY = "nakane_long:cache:v1"
+CACHE_MAX_BYTES = 3_000_000
+CACHE_TTL_SEC = 90 * 86400
 DIVISORS = (1000, 100000)               # 円ペアは小数3桁(1000)か5桁(100000)
 PRICE_RANGE = (50.0, 250.0)
 
@@ -124,14 +135,15 @@ def fetch_day(day: date):
     hours = {}
     for hour in HOURS_UTC:
         last_exc = None
-        for attempt in range(3):
+        for attempt in range(len(RETRY_BACKOFF_SEC) + 1):
             try:
                 hours[hour] = fetch_hour(day, hour)
                 last_exc = None
                 break
             except Exception as exc:
                 last_exc = exc
-                time.sleep(1.0 * (attempt + 1))
+                if attempt < len(RETRY_BACKOFF_SEC):
+                    time.sleep(RETRY_BACKOFF_SEC[attempt])
         if last_exc is not None:
             raise last_exc
         time.sleep(REQUEST_SLEEP_SEC)
@@ -139,42 +151,97 @@ def fetch_day(day: date):
     return opens if len(opens) >= len(MINUTES) * 0.8 else None
 
 
-def fetch_all(years: int, end: date = END_DATE, workers: int = WORKERS):
+# ---------------------------------------------------------------- 取得済みデータの保存(Redis。失敗しても無視)
+
+def _redis_client():
+    if not config.REDIS_URL:
+        return None
+    import redis
+
+    return redis.from_url(config.REDIS_URL, decode_responses=False, socket_timeout=20, socket_connect_timeout=10)
+
+
+def encode_cache(data: dict) -> bytes:
+    payload = {d.isoformat(): {str(m): list(v) for m, v in opens.items()} for d, opens in data.items()}
+    return zlib.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"), 6)
+
+
+def decode_cache(blob: bytes) -> dict:
+    raw = json.loads(zlib.decompress(blob).decode("utf-8"))
+    return {date.fromisoformat(d): {int(m): tuple(v) for m, v in opens.items()} for d, opens in raw.items()}
+
+
+def load_cache() -> dict:
+    try:
+        client = _redis_client()
+        blob = client.get(CACHE_KEY) if client else None
+        if not blob:
+            return {}
+        data = decode_cache(blob)
+        logger.info("[NAKANE-LONG] 保存済みのデータを読み込みました(%d日)", len(data))
+        return data
+    except Exception as exc:
+        logger.warning("[NAKANE-LONG] 保存済みデータを読めませんでした(無視): %s", _describe_error(exc))
+        return {}
+
+
+def save_cache(data: dict) -> None:
+    try:
+        client = _redis_client()
+        if client is None or not data:
+            return
+        blob = encode_cache(data)
+        if len(blob) > CACHE_MAX_BYTES:
+            logger.warning("[NAKANE-LONG] 保存データが大きすぎるため保存しません(%d bytes)", len(blob))
+            return
+        client.set(CACHE_KEY, blob, ex=CACHE_TTL_SEC)
+        logger.info("[NAKANE-LONG] データを保存しました(%d日、%d bytes)", len(data), len(blob))
+    except Exception as exc:
+        logger.warning("[NAKANE-LONG] データを保存できませんでした(無視): %s", _describe_error(exc))
+
+
+def fetch_all(years: int, end: date = END_DATE, cache: dict | None = None, save=None):
+    """順番に(1本ずつ)取得する。連続で失敗が続けば、そこで止めて、取れた分を返す。
+    戻り値: (データ, メモ, 開始日, 終了日, 途中で止まったか)。"""
     start = end - timedelta(days=365 * years)
     targets = [d for d in (start + timedelta(days=i) for i in range((end - start).days + 1)) if is_business_day(d)]
-    data, failures, empty = {}, [], 0
-    lock = threading.Lock()
-    done = [0]
-
-    def work(day):
-        nonlocal empty
+    data, failures, empty, reused, consecutive, partial = {}, [], 0, 0, 0, False
+    new_since_save, logged_sample = 0, False
+    for i, day in enumerate(targets):
+        if cache and day in cache:
+            data[day] = cache[day]
+            reused += 1
+            continue
         try:
             opens = fetch_day(day)
-            with lock:
-                if opens:
-                    data[day] = opens
-                else:
-                    empty += 1
+            consecutive = 0
+            if opens:
+                data[day] = opens
+                new_since_save += 1
+                if not logged_sample and M(9, 55) in opens:
+                    logged_sample = True
+                    logger.info("[NAKANE-LONG] 取得の確認 %s 9:55 BID/ASK=%s 9:56=%s(分の数%d)", day, opens[M(9, 55)],
+                                opens.get(M(9, 56)), len(opens))
+            else:
+                empty += 1
         except Exception as exc:
-            with lock:
-                failures.append(f"{day}: {_describe_error(exc)}")
-        with lock:
-            done[0] += 1
-            if done[0] % 100 == 0:
-                logger.info("[NAKANE-LONG] 取得 %d/%d日", done[0], len(targets))
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(work, day) for day in targets]
-        for f in futures:
-            f.result()
-            if len(failures) > max(5, len(targets) * MAX_FAILURE_RATE):
-                for g in futures:
-                    g.cancel()
-                raise RuntimeError(f"取得失敗が多すぎます({len(failures)}/{len(targets)}日): " + " / ".join(failures[:3]))
+            failures.append(f"{day}: {_describe_error(exc)}")
+            consecutive += 1
+            if consecutive >= MAX_CONSECUTIVE_FAILURES or len(failures) > max(10, len(targets) * MAX_FAILURE_RATE):
+                partial = True
+                break
+        if (i + 1) % 100 == 0:
+            logger.info("[NAKANE-LONG] 取得 %d/%d日(取得済み%d・失敗%d)", i + 1, len(targets), len(data), len(failures))
+            if save and new_since_save:
+                save(data)
+                new_since_save = 0
+    if save and new_since_save:
+        save(data)
     if not data:
         raise RuntimeError("ティックデータが1日分も取得できませんでした: " + " / ".join(failures[:3]))
-    notes = [f"対象の営業日{len(targets)}日、取得{len(data)}日、データ無し{empty}日、失敗{len(failures)}件"] + failures[:5]
-    return data, notes, start, end
+    notes = [f"対象の営業日{len(targets)}日、取得{len(data)}日(うち保存済み{reused}日)、データ無し{empty}日、失敗{len(failures)}件"
+             + ("、連続失敗のため途中で停止" if partial else "")] + failures[:5]
+    return data, notes, start, end, partial
 
 
 # ---------------------------------------------------------------- 分析
@@ -192,6 +259,7 @@ def welch_t(a: list[float], b: list[float]) -> float:
 
 
 def build_report(data, header: str):
+    data = {d: o for d, o in data.items() if all(m in o for m in REQUIRED_MINUTES)}
     days = sorted(data)
     gotobi = gotobi_days(days[0], days[-1])
     kinds = {d: classify(d, gotobi) for d in days}
@@ -244,11 +312,16 @@ def build_report(data, header: str):
 
 def run_nakane_long(years: int):
     started = time.monotonic()
-    notify(f"🧪 仲値後のドテン売りの長期検証を開始します(2023年10月27日から遡る{years}年・Dukascopy)。取得に数十分かかる場合があります。")
-    data, notes, start, end = fetch_all(years)
+    notify(f"🧪 仲値後のドテン売りの長期検証を開始します(2023年10月27日から遡る{years}年・Dukascopy)。"
+           f"1本ずつ取得するため、数十分かかります(保存済みの分は省略)。")
+    cache = load_cache()
+    data, notes, start, end, partial = fetch_all(years, cache=cache, save=save_cache)
     for note in notes:
         logger.info("[NAKANE-LONG] %s", note)
-    header = f"USD/JPY ティック(Dukascopy) {start}〜{end} 取得{len(data)}日"
+    if partial and len(data) < MIN_DAYS_FOR_PARTIAL:
+        raise RuntimeError(f"取得が途中で止まり、分析に必要な{MIN_DAYS_FOR_PARTIAL}日に届きませんでした(取得{len(data)}日): "
+                           + " / ".join(notes[1:3]) + "。もう一度実行すると、保存済みの分から再開します")
+    header = f"USD/JPY ティック(Dukascopy) {start}〜{end} 取得{len(data)}日" + ("【途中で停止。取れた分だけの分析】" if partial else "")
     report = build_report(data, header)
     if len(notes) > 1:
         report += "\n※取得の問題: " + " / ".join(notes[1:])[:300]
